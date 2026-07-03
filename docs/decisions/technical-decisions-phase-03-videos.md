@@ -1,7 +1,7 @@
 ---
 scope_type: phase
 related_phases: [3]
-status: pending
+status: decided
 date: 2026-07-03
 scope_description: "Upload e processamento de vídeos: fila de background jobs, upload resiliente de até 10GB, organização do object storage S3/MinIO, worker FFmpeg/ffprobe, geração de thumbnail, streaming com Range/206, URL única por vídeo, ciclo de status e comportamento em falha."
 ---
@@ -13,6 +13,8 @@ _Subprojects in scope:_
 - `nestjs-project/` — recebe toda a decisão desta fase: módulo de fila, upload, storage, worker FFmpeg/ffprobe, streaming e ciclo de status do vídeo.
 - `next-frontend/` — sem decisão aberta neste documento. Nenhuma bullet de capability da Fase 03 em `docs/project-plan.md` menciona tela ou componente de frontend (upload UI, player) — a página de visualização com player é explicitamente `Fase 05`, e o painel de gerenciamento/edição de vídeo é `Fase 04`. A Fase 03 é backend-only (upload resiliente, processamento em background, streaming via URL direta ao storage).
 
+> **Premissas fixadas pelo enunciado:** o armazenamento de objetos é S3-compatível (MinIO local em Docker) — **não é uma decisão em aberto** neste documento (ver Context de TD-03). A **decisão de stack em aberto desta fase é a tecnologia de fila** (TD-01).
+
 > **Nota sobre pesquisa:** o MCP `context7` (obrigatório por `CLAUDE.md` §"Library Documentation Lookup") não estava conectado nesta sessão — apenas o servidor `postgres` estava configurado em `.mcp.json`. As versões e comparações de bibliotecas abaixo foram obtidas via `npm view <pkg> version` (registry real, versões atuais em 2026-07-03) e busca na documentação oficial/comunidade via `WebSearch`. Sinalizado para o usuário na resposta desta etapa.
 
 ---
@@ -21,7 +23,7 @@ _Subprojects in scope:_
 
 **Scope:** Backend
 
-**Capability:** Serviço de processamento em segundo vídeo (filas) — *(bullet literal: "Serviço de processamento em segundo plano (filas)")*
+**Capability:** Serviço de processamento em segundo plano (filas)
 
 **Context:** O diagrama `docs/diagrams/software-arch.mermaid` define um container `Message Queue` com tecnologia `"TBD"` — esta é a decisão de stack em aberto citada no enunciado. A API precisa enfileirar um job de processamento por vídeo enviado; o Video Worker consome esses jobs. A infra atual (`nestjs-project/compose.yaml`) tem apenas `nestjs-api`, `db` (PostgreSQL 17) e `mailpit` — nenhum broker de fila existe hoje.
 
@@ -44,9 +46,9 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (BullMQ + `@nestjs/bullmq`)** — processamento de vídeo é trabalho de background pesado (FFmpeg, potencialmente minutos por job), não apenas enfileiramento simples; os recursos maduros de retry/backoff/concorrência/stalled-job recovery do BullMQ são o ajuste mais direto. Redis é um único container leve adicional (a fase já está adicionando MinIO de qualquer forma) e `@nestjs/bullmq` mantém o mesmo padrão de confiança de manutenção (módulo documentado oficialmente pela NestJS) já usado no projeto. A vantagem de "zero infra nova" do pg-boss é real, mas seu ecossistema de integração NestJS é de terceiros e fragmentado — um degrau de confiança abaixo do módulo oficial.
 
-**Decision:** _[pending]_
+**Decision:** A (BullMQ + `@nestjs/bullmq`) — fila madura baseada em Redis, com módulo de integração oficialmente documentado pela NestJS e recursos nativos de retry/backoff/concorrência adequados a jobs longos de processamento de vídeo. Redis é aceito como nova infraestrutura por ser um único container leve de operar, frente ao degrau de maturidade de integração NestJS que separa esta opção de pg-boss.
 
-**Impact on Implementation:** Novo serviço `redis` em `nestjs-project/compose.yaml` (ex. `redis:7-alpine`). Novo config namespace `queue.config.ts` (padrão `registerAs`, seguindo `phase-01/TD-03`) com `REDIS_HOST`/`REDIS_PORT`. `AppModule` registra `BullModule.forRootAsync`; um módulo de vídeo registra a `Queue` (produtor) via `BullModule.registerQueue`. O Video Worker (TD-04) registra o `Worker`/processor correspondente.
+**Impact on Implementation:** Novo serviço `redis` em `nestjs-project/compose.yaml`. Novo namespace de configuração para a fila, seguindo o padrão `registerAs` já estabelecido (`phase-01/TD-03`). `AppModule` registra o módulo de fila do lado produtor; o Video Worker (TD-04) registra o consumidor correspondente. Nomes exatos de arquivos e variáveis de ambiente ficam para a etapa de implementação.
 
 **Risks & Mitigation:** Redis torna-se um ponto único de falha adicional para o pipeline de processamento — mitigado por `persistence` padrão do Redis (AOF/RDB) já suficiente neste estágio (sem requisito de alta disponibilidade no plano). Jobs perdidos em caso de crash do Redis sem persistência habilitada — mitigar configurando `appendonly yes` no serviço `redis` do compose.
 
@@ -78,7 +80,7 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (S3 Multipart Upload com URLs pré-assinadas)** — satisfaz a restrição explícita sem introduzir infraestrutura nova, e a resumabilidade por parte é suficiente para o requisito "permita retomar em caso de falha de conexão" (o usuário não precisa retomar do byte exato, apenas não reenviar partes já confirmadas). Depende de TD-03 para o cliente/SDK usado para assinar as URLs.
 
-**Decision:** _[pending]_
+**Decision:** Option A (S3 Multipart Upload com URLs pré-assinadas). Ajuda a reduzir a infraestrutura necessária e já tem o requisito de enviar chuncks para não travar e não passar pela API.
 
 **Impact on Implementation:** Endpoints novos no módulo de vídeos: iniciar upload (cria registro `draft` + `uploadId`), obter URL assinada por parte, completar upload (dispara enfileiramento do job de processamento — TD-01/TD-04), abortar upload. Nenhuma mudança em `compose.yaml` além do já previsto para MinIO (TD-03).
 
@@ -114,9 +116,9 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (bucket único, chaves prefixadas por `videoId`)** — mais simples, sem teto de escala (ao contrário da Option C) e sem provisionamento duplicado sem justificativa de requisito (ao contrário da Option B). A chave usa o mesmo UUID decidido em TD-07 como identificador público, unificando "chave de storage" e "identificador de URL" — nenhuma tabela de mapeamento extra necessária.
 
-**Decision:** _[pending]_
+**Decision:** A (bucket único, chaves prefixadas por `videoId`, cliente AWS SDK v3) — evita o teto de cota de buckets por conta (Option C) e o provisionamento duplicado sem requisito correspondente no plano (Option B); a chave reaproveita o UUID de TD-07, unificando identificador público e chave de storage.
 
-**Impact on Implementation:** Novo config namespace `storage.config.ts` (`registerAs`) com `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION` (dummy em MinIO), `S3_FORCE_PATH_STYLE=true`. Novo serviço `minio` em `compose.yaml` com criação do bucket no boot (ex. `mc mb` num container de init, ou `MINIO_DEFAULT_BUCKETS`). Download e streaming (TD-06) reaproveitam o mesmo mecanismo de GET pré-assinado: download força `ResponseContentDisposition: attachment; filename="..."` na assinatura, streaming/playback omite esse parâmetro (inline) — mesma chave, mesmo endpoint, apenas parâmetro de assinatura diferente.
+**Impact on Implementation:** Novo namespace de configuração para storage (padrão `registerAs`), com as variáveis de conexão ao endpoint S3-compatível (credenciais, bucket, region, path-style). Novo serviço `minio` em `compose.yaml` com criação do bucket no boot. Download e streaming (TD-06) reaproveitam o mesmo mecanismo de GET pré-assinado: download força disposição de anexo na assinatura, streaming/playback omite esse parâmetro (inline) — mesma chave, mesmo endpoint, apenas o parâmetro de assinatura muda. Nomes exatos de arquivos e variáveis de ambiente ficam para a etapa de implementação.
 
 **Risks & Mitigation:** Credenciais MinIO hardcoded em dev vs. credenciais reais de S3 em produção — já mitigado pelo padrão `registerAs` + Joi validation já estabelecido (TD-01/TD-02 da Fase 01), sem necessidade de mecanismo novo. Bucket policy mal configurada expondo objetos publicamente antes do vídeo estar `ready` — mitigado por bucket privado por padrão + acesso exclusivamente via URL pré-assinada (TD-06), nunca ACL pública.
 
@@ -165,11 +167,11 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (`child_process.spawn` direto)** — evita depender de um wrapper sinalizado como não mantido para um escopo de operações pequeno e estável; alinhado ao rótulo `"FFmpeg"` self-hosted do C4.
 
-**Decision:** _[pending]_
+**Decision:** A para as duas sub-decisões — (1) Topologia: mesmo codebase NestJS com dois bootstraps/containers (`nestjs-api` via `main.ts`, Video Worker via um bootstrap standalone), evitando duplicar entities/config em um segundo subprojeto; (2) Invocação FFmpeg/ffprobe: `child_process.spawn` direto sobre os binários, evitando a dependência não mantida do `fluent-ffmpeg`.
 
 **Impact on Implementation:** Novo serviço `video-worker` em `compose.yaml` (mesma imagem/build de `nestjs-api`, `command` diferente, `depends_on: [db, redis, minio]`). Dockerfile (dev e produção) precisa instalar `ffmpeg` (fornece ambos os binários `ffmpeg` e `ffprobe`). Worker baixa o objeto original do storage (ou processa via stream, a definir na implementação), roda ffprobe, roda ffmpeg para thumbnail, sobe o resultado ao storage (TD-03), atualiza o registro do vídeo (TD-08) via TypeORM.
 
-**Risks & Mitigation:** Binário `ffmpeg` ausente ou versão incompatível quebra o worker silenciosamente até o primeiro job — mitigar com um healthcheck/smoke test no boot do worker (`ffmpeg -version`) falhando o container cedo. Processos `ffmpeg` travados (input corrompido) consomem CPU indefinidamente — mitigar com timeout no `spawn` (kill do processo após N minutos) e reportar como falha (TD-09), não travar a fila.
+**Risks & Mitigation:** Binário `ffmpeg` ausente ou versão incompatível quebra o worker silenciosamente até o primeiro job — mitigar com um healthcheck/smoke test no boot do worker (`ffmpeg -version`) falhando o container cedo. Processos `ffmpeg` travados (input corrompido) consomem CPU indefinidamente — mitigar com timeout no `spawn` (kill do processo após N minutos) e reportar como falha (TD-09), não travar a fila. Vídeos de até 10GB baixados integralmente para processamento local exigem espaço em disco efêmero proporcional no container do worker — risco direto da escala de arquivo definida no enunciado, não endereçado hoje; mitigar dimensionando o volume/disco do serviço `video-worker` para o pior caso (10GB) ou avaliando processamento via stream direto do storage na implementação.
 
 ---
 
@@ -198,7 +200,7 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (frame em offset relativo, ex. 10% da duração)** — melhor equilíbrio: evita o problema comum de frame preto da Option B a custo quase zero (a duração já está disponível do mesmo job ffprobe de TD-04), sem a complexidade adicional da Option C para uma feature que a Fase 04 já torna substituível pelo usuário.
 
-**Decision:** _[pending]_
+**Decision:** Option A (frame em offset relativo, ex. 10% da duração). Evita o problema do frame preto e garante uma thumbnail.
 
 **Impact on Implementation:** Etapa do job do worker (TD-04): calcular `offset = max(1, duration * 0.1)` segundos, extrair frame único, salvar em `videos/{videoId}/thumbnail.jpg` (TD-03).
 
@@ -231,7 +233,7 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (acesso direto via URL pré-assinada)** — a única opção consistente com a arquitetura já documentada no C4 (`frontend → storage: Streams, HTTPS`), e obtém corretude de Range/206 de graça a partir do protocolo S3 em vez de reimplementá-la (com seus casos de borda) dentro do NestJS.
 
-**Decision:** _[pending]_
+**Decision:** Option A (acesso direto via URL pré-assinada). Consistencia com a arquitetura documentada no C4
 
 **Impact on Implementation:** Endpoint da API para obter a URL de reprodução de um vídeo `ready` retorna a URL pré-assinada (TD-03), não um stream. Nenhum código de parsing de `Range` necessário na API.
 
@@ -264,7 +266,7 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (reaproveitar o UUID da PK)** — consistente com o padrão de identificador já estabelecido em todas as entities do projeto (rastreável a `phase-02-auth/TD` Data Model), sem lógica de colisão adicional (diferente do nickname), e o mesmo valor já serve como chave de storage em TD-03 — nenhuma tabela ou coluna extra de mapeamento necessária.
 
-**Decision:** _[pending]_
+**Decision:** A (reaproveitar o UUID da PK) — mesmo padrão já usado em `User`, `Channel`, `RefreshToken` e `VerificationToken` (Fase 02), sem lógica de colisão adicional e reaproveitando o mesmo valor como chave de storage (TD-03).
 
 **Impact on Implementation:** Nenhuma coluna extra na entity de vídeo além da PK `id: uuid`. Rotas públicas usam `:id` diretamente (ex. `GET /videos/:id`).
 
@@ -296,7 +298,7 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (coluna única `status`, enum nativo PostgreSQL)** — segue diretamente o precedente já estabelecido no projeto (`VerificationToken.type`), elimina estados inconsistentes por construção (ao contrário da Option B), e não introduz modelagem de auditoria não requisitada pelo plano (ao contrário da Option C).
 
-**Decision:** _[pending]_
+**Decision:** Option A (coluna única `status`, enum nativo PostgreSQL). Por ser mais simples e não precisar de modelagem de auditoria.
 
 **Impact on Implementation:** Coluna `status` na entity de vídeo (enum Postgres `'draft' | 'processing' | 'ready' | 'error'`, default `'draft'`). Transições: criação do registro → `draft`; job de worker iniciado (consumido da fila) → `processing`; job concluído com sucesso → `ready`; job falho após esgotar retries (TD-09) → `error`.
 
@@ -329,11 +331,11 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A (retry limitado via mecanismo nativo da fila)** — equilibra resiliência a falhas transitórias (rede, OOM momentâneo) contra não mascarar falhas permanentes para sempre (ao contrário da Option C), sem exigir uma UI/endpoint de retry manual não previsto no plano (que a Option B tornaria necessário logo em seguida, na prática). Depende diretamente de TD-01: os parâmetros exatos (número de tentativas, estratégia de backoff) usam a API nativa de retry da tecnologia de fila escolhida.
 
-**Decision:** _[pending]_
+**Decision:** A (retry limitado via mecanismo nativo da fila, depois `error`) — absorve falhas transitórias (rede, storage, OOM momentâneo) sem intervenção manual e converge para `error` de forma previsível, em vez de reprocessar indefinidamente (Option C) ou desistir sem tolerância a falhas transitórias (Option B).
 
-**Impact on Implementation:** Configuração de `attempts`/`backoff` (BullMQ) ou `retryLimit`/`retryBackoff` (pg-boss) no registro do job em TD-01. Coluna adicional na entity de vídeo para armazenar a mensagem de erro (ex. `error_message: text, nullable`), populada apenas na transição final para `error`.
+**Impact on Implementation:** Configuração de tentativas/backoff no registro do job, usando o mecanismo nativo da tecnologia de fila escolhida em TD-01. Nova coluna na entity de vídeo para armazenar a mensagem de erro, populada apenas na transição final para `error` — tipo e nulidade exatos ficam para a etapa de implementação (convenções TypeORM já estabelecidas no projeto).
 
-**Risks & Mitigation:** Erros genéricos ("Internal processing error") sem detalhe suficiente para debugging — mitigar exigindo que o worker capture e persista a mensagem de erro real (stderr do ffmpeg/ffprobe, mensagem da exception) em `error_message`, não um texto fixo genérico. Objeto já enviado ao storage antes da falha (ex. upload ok, ffprobe falha) fica órfão — mitigar reaproveitando a mesma lifecycle policy de limpeza mencionada em TD-02 (ou exclusão explícita do objeto original ao marcar `error`, a definir na implementação).
+**Risks & Mitigation:** Erros genéricos ("Internal processing error") sem detalhe suficiente para debugging — mitigar exigindo que o worker capture e persista a mensagem de erro real (stderr do ffmpeg/ffprobe, mensagem da exception), não um texto fixo genérico. Objeto já enviado ao storage antes da falha (ex. upload ok, ffprobe falha) fica órfão — mitigar reaproveitando a mesma lifecycle policy de limpeza mencionada em TD-02 (ou exclusão explícita do objeto original ao marcar `error`, a definir na implementação).
 
 ---
 
@@ -362,9 +364,9 @@ _Subprojects in scope:_
 
 **Recommendation:** **Option A** — direta continuação do precedente já estabelecido em `nestjs-project/CLAUDE.md` (infraestrutura real em testes de integração, convenção única de comando `docker compose exec nestjs-api`), decorrência natural de TD-04 Option A (mesma imagem para API e worker).
 
-**Decision:** _[pending]_
+**Decision:** Option A: Estender a imagem/Dockerfile única existente; testes continuam via `docker compose exec nestjs-api`. Consistencia com o que foi decidido no TD-04
 
-**Impact on Implementation:** `nestjs-project/compose.yaml` ganha 3 novos serviços: `minio` (com criação do bucket no boot), `redis` (se TD-01 = BullMQ), `video-worker` (mesma imagem de `nestjs-api`, `depends_on: [db, redis, minio]`, comando de bootstrap standalone). `Dockerfile.dev` ganha `apt-get install -y ffmpeg`. Fixtures de vídeo pequenas (ex. 1-3s, poucos KB, formato mp4/webm) versionadas em `nestjs-project/test/fixtures/` para uso em specs de integração/e2e do pipeline de processamento.
+**Impact on Implementation:** `nestjs-project/compose.yaml` ganha 3 novos serviços: `minio` (com criação do bucket no boot), `redis` (se TD-01 = BullMQ), `video-worker` (mesma imagem de `nestjs-api`, `depends_on: [db, redis, minio]`, comando de bootstrap standalone). `Dockerfile.dev` passa a instalar o binário `ffmpeg` (fornece `ffmpeg` e `ffprobe`). Fixtures de vídeo pequenas (ex. 1-3s, poucos KB, formato mp4/webm) versionadas em `nestjs-project/test/fixtures/` para uso em specs de integração/e2e do pipeline de processamento.
 
 **Risks & Mitigation:** Tempo de `docker compose up` e de build da imagem aumenta (instalação de `ffmpeg` + mais serviços) — aceitável dado que já é o padrão do projeto adicionar serviços incrementalmente por fase (Mailpit foi adicionado na Fase 02 do mesmo jeito). Testes de integração de processamento de vídeo tornam a suíte mais lenta — mitigar mantendo fixtures de vídeo propositalmente minúsculas e reservando a suíte `*.e2e-spec.ts` (mais lenta, já rodada separadamente via `npm run test:e2e`) para os cenários de pipeline completo, seguindo a mesma separação unit/integration/e2e já convencionada no projeto.
 
@@ -374,13 +376,13 @@ _Subprojects in scope:_
 
 | ID | Scope | Decision | Recommendation | Choice |
 |----|-------|----------|---------------|--------|
-| TD-01 | Backend | Tecnologia de Fila | A (BullMQ + `@nestjs/bullmq`, Redis) | _[pending]_ |
-| TD-02 | Backend | Estratégia de Upload de 10GB sem Travar a API | A (S3 Multipart Upload com URLs pré-assinadas) | _[pending]_ |
-| TD-03 | Backend | Object Storage — Buckets, Chaves, Upload e Download | A (bucket único, chaves prefixadas por `videoId`; AWS SDK v3) | _[pending]_ |
-| TD-04 | Backend | Execução do Worker e Processamento FFmpeg/ffprobe | A (mesmo codebase, dois bootstraps/containers; `child_process.spawn` direto) | _[pending]_ |
-| TD-05 | Backend | Estratégia de Geração de Thumbnail | A (frame único em offset relativo, ex. 10% da duração) | _[pending]_ |
-| TD-06 | Backend | Streaming com Range/206 Partial Content | A (cliente acessa storage diretamente via URL pré-assinada) | _[pending]_ |
-| TD-07 | Backend | Estratégia de URL Única por Vídeo | A (reaproveitar UUID da PK) | _[pending]_ |
-| TD-08 | Backend | Ciclo de Status — draft/processing/ready/error | A (coluna única `status`, enum nativo PostgreSQL) | _[pending]_ |
-| TD-09 | Backend | Comportamento em Falha de Processamento | A (retry automático limitado via mecanismo nativo da fila, depois `error`) | _[pending]_ |
-| TD-10 | Backend | Implicações para Testes e Docker Compose | A (estender imagem/Dockerfile existente; testes via `docker compose exec nestjs-api`) | _[pending]_ |
+| TD-01 | Backend | Tecnologia de Fila | A (BullMQ + `@nestjs/bullmq`, Redis) | **A** |
+| TD-02 | Backend | Estratégia de Upload de 10GB sem Travar a API | A (S3 Multipart Upload com URLs pré-assinadas) | **A** |
+| TD-03 | Backend | Object Storage — Buckets, Chaves, Upload e Download | A (bucket único, chaves prefixadas por `videoId`; AWS SDK v3) | **A** |
+| TD-04 | Backend | Execução do Worker e Processamento FFmpeg/ffprobe | A (mesmo codebase, dois bootstraps/containers; `child_process.spawn` direto) | **A** (ambas as sub-decisões) |
+| TD-05 | Backend | Estratégia de Geração de Thumbnail | A (frame único em offset relativo, ex. 10% da duração) | **A** |
+| TD-06 | Backend | Streaming com Range/206 Partial Content | A (cliente acessa storage diretamente via URL pré-assinada) | **A** |
+| TD-07 | Backend | Estratégia de URL Única por Vídeo | A (reaproveitar UUID da PK) | **A** |
+| TD-08 | Backend | Ciclo de Status — draft/processing/ready/error | A (coluna única `status`, enum nativo PostgreSQL) | **A** |
+| TD-09 | Backend | Comportamento em Falha de Processamento | A (retry automático limitado via mecanismo nativo da fila, depois `error`) | **A** |
+| TD-10 | Backend | Implicações para Testes e Docker Compose | A (estender imagem/Dockerfile existente; testes via `docker compose exec nestjs-api`) | **A** |
