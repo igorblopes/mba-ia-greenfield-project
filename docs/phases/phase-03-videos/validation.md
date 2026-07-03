@@ -2,17 +2,19 @@
 kind: phase
 name: phase-03-videos
 status: dirty
-issue_count: 2
+issue_count: 0
 sources_mtime:
   docs/phases/phase-03-videos/context.md: "2026-07-03T19:34:04-03:00"
   docs/decisions/technical-decisions-phase-03-videos.md: "2026-07-03T15:40:16-03:00"
 issues:
   - id: MD-1
-    status: open
+    status: resolved
     summary: "Versões das libs novas de fila (TD-01) e storage (TD-03) não fixadas"
+    resolved_by: "library-refs.md — versões fixadas via context7 + Libraries em TD-01/TD-03"
   - id: AMB-1
-    status: open
+    status: resolved
     summary: "Metadados a extrair/persistir além de duration não enumerados (TD-04)"
+    resolved_by: "phase-03-videos/TD-04 — Revisions: duration, width, height, size"
 advisories: []
 ---
 
@@ -28,11 +30,11 @@ _(Observações não-bloqueantes, verificadas contra o enunciado em `docs/projec
 
 ### Ambiguities
 
-- **AMB-1** — A capability "Processamento automático do vídeo após upload (extração de duração e **metadados**)" pede metadados no plural, mas nenhum TD enumera **quais** metadados são extraídos e persistidos além de `duration`. TD-04 cobre a invocação do `ffprobe`, TD-08 a coluna `status` e TD-09 a coluna de mensagem de erro — nenhum define as colunas de metadados da entity `Video`. Sem isso, o plan-build não consegue derivar o Data Model completo (colunas tipadas por campo — resolução/dimensões, tamanho, codec, bitrate — vs. somente `duration` vs. blob JSON) sem adivinhar. Explicit choice: enumerar o conjunto concreto de campos de metadados (ex. `duration` + `width`/`height` + `size`, ou `duration`-only) via `/plan-resolve phase-03-videos` (ou `/research` se exigir uma decisão estratégica de modelagem).
+_None._
 
 ### Missing Decisions
 
-- **MD-1** — As dependências npm novas decididas em `phase-03-videos/TD-01` (`bullmq`, `@nestjs/bullmq`) e `phase-03-videos/TD-03` (`@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner`) estão **sem versão fixada**: ausentes de `nestjs-project/package.json` e listadas sem faixa de versão no Decisions Index/Detail — divergindo do padrão das Fases 01/02, cujos TDs fixam faixas (ex. `argon2@^0.41.x`, `@nestjs/config@^4.x`, `joi@^17.x`). `CLAUDE.md` torna obrigatório o lookup de documentação via context7 e a resolução de versão antes de implementar; com o veredito `clean` o pipeline pularia o `plan-resolve` e chegaria ao `plan-build` sem `library-refs.md` para essas libs. Explicit choice: rodar `/plan-resolve phase-03-videos` (fixa as versões via context7 e grava `library-refs.md`) **ou** adicionar faixas de versão explícitas a `phase-03-videos/TD-01` e `phase-03-videos/TD-03` via `/research`. _(Os binários de sistema `ffmpeg`/`ffprobe` de TD-04 são corretamente não-fixados por npm — instalados via `Dockerfile.dev`; fora deste gap.)_
+_None._
 
 ### Dependency Gaps
 
@@ -60,4 +62,5 @@ _(Fase backend-only — `next-frontend/` diferido, nenhum `## UI Inventory`. UIG
 
 ## Resolved Issues
 
-_No issues resolved yet._
+- **MD-1** — Versões das libs novas de fila (TD-01) e storage (TD-03) não fixadas. resolved_by: `library-refs.md` (versões fixadas via context7 — `bullmq@^5.79.2`, `@nestjs/bullmq@^11.0.4`, `@aws-sdk/client-s3@^3.1079.0`, `@aws-sdk/s3-request-presigner@^3.1079.0`) + linhas `**Libraries:**` adicionadas a `phase-03-videos/TD-01` e `phase-03-videos/TD-03`. Binários de sistema `ffmpeg`/`ffprobe` (TD-04) registrados em `library-refs.md` como não-npm (fora do gap de versão npm).
+- **AMB-1** — Metadados a extrair/persistir além de `duration` não enumerados (TD-04). resolved_by: `phase-03-videos/TD-04` — bloco `**Revisions:**` (2026-07-03) fixa o conjunto `duration` (int, s), `width`/`height` (int, px) e `size` (bigint, bytes), propagado ao `## Decisions Detail` de `context.md` para o plan-build derivar o Data Model.
