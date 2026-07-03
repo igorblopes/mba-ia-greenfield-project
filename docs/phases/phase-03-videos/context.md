@@ -3,7 +3,7 @@ kind: phase
 name: phase-03-videos
 sources_mtime:
   docs/project-plan.md: "2026-06-27T19:39:34-03:00"
-  docs/decisions/technical-decisions-phase-03-videos.md: "2026-07-03T15:40:16-03:00"
+  docs/decisions/technical-decisions-phase-03-videos.md: "2026-07-03T20:35:34-03:00"
   docs/phases/phase-02-auth/context.md: "2026-06-27T19:39:34-03:00"
   docs/phases/phase-01-configuracao-base/context.md: "2026-06-27T19:39:34-03:00"
 ---
@@ -45,10 +45,11 @@ sources_mtime:
 
 | Ref | Source | Scope | Topic | Status | Decision | Libraries |
 |-----|--------|-------|-------|--------|----------|-----------|
-| phase-03-videos/TD-01 | technical-decisions-phase-03-videos.md | Backend | Tecnologia de Fila | decided | A (BullMQ + `@nestjs/bullmq`, Redis) | bullmq, @nestjs/bullmq |
+| phase-03-videos/TD-01 | technical-decisions-phase-03-videos.md | Backend | Tecnologia de Fila | decided | A (BullMQ + `@nestjs/bullmq`, Redis) | bullmq@^5.79.2, @nestjs/bullmq@^11.0.4 |
 | phase-03-videos/TD-02 | technical-decisions-phase-03-videos.md | Backend | Upload de até 10GB sem travar a API | decided | A (S3 Multipart Upload, URLs pré-assinadas por parte) | — |
-| phase-03-videos/TD-03 | technical-decisions-phase-03-videos.md | Backend | Object Storage — buckets, chaves, upload/download | decided | A (bucket único, chaves por `videoId`; AWS SDK v3) | @aws-sdk/client-s3, @aws-sdk/s3-request-presigner |
-| phase-03-videos/TD-04 | technical-decisions-phase-03-videos.md | Backend | Worker + processamento FFmpeg/ffprobe | decided | A (mesmo codebase, 2 bootstraps/containers; `child_process.spawn`) | ffmpeg/ffprobe (binários de sistema) |
+| phase-03-videos/TD-03 | technical-decisions-phase-03-videos.md | Backend | Object Storage — buckets, chaves, upload/download | decided | A (bucket único, chaves por `videoId`; AWS SDK v3) | @aws-sdk/client-s3@^3.1079.0, @aws-sdk/s3-request-presigner@^3.1079.0 |
+| phase-03-videos/TD-04 | technical-decisions-phase-03-videos.md | Backend | Worker + processamento FFmpeg/ffprobe | decided | A (mesmo codebase, 2 bootstraps/containers; `child_process.spawn`) | ffmpeg/ffprobe (binários de sistema, não-npm) |
+|     └─ Last revision: 2026-07-03 — Metadados persistidos na entity Video: duration, width, height, size | | | | | | |
 | phase-03-videos/TD-05 | technical-decisions-phase-03-videos.md | Backend | Geração de thumbnail | decided | A (frame em offset relativo, ~10% da duração) | — |
 | phase-03-videos/TD-06 | technical-decisions-phase-03-videos.md | Backend | Streaming com Range / 206 Partial Content | decided | A (cliente acessa storage direto via URL pré-assinada) | — |
 | phase-03-videos/TD-07 | technical-decisions-phase-03-videos.md | Backend | URL única por vídeo | decided | A (reaproveitar UUID da PK) | — |
@@ -80,7 +81,7 @@ _Source files:_
 
 **Recommendation:** Processamento de vídeo é trabalho de background pesado (FFmpeg, potencialmente minutos por job), não apenas enfileiramento simples; os recursos maduros de retry/backoff/concorrência/stalled-job recovery do BullMQ são o ajuste mais direto. Redis é um único container leve adicional (a fase já está adicionando MinIO de qualquer forma) e `@nestjs/bullmq` mantém o mesmo padrão de confiança de manutenção (módulo documentado oficialmente pela NestJS) já usado no projeto. A vantagem de "zero infra nova" do pg-boss é real, mas seu ecossistema de integração NestJS é de terceiros e fragmentado — um degrau de confiança abaixo do módulo oficial. Novo serviço `redis` em `compose.yaml` (com `appendonly yes`); `AppModule` registra o lado produtor (`Queue`), o Video Worker registra o consumidor (`Worker`).
 
-**Libraries:** bullmq, @nestjs/bullmq
+**Libraries:** bullmq@^5.79.2, @nestjs/bullmq@^11.0.4
 
 ### phase-03-videos/TD-02
 
@@ -92,13 +93,17 @@ _Source files:_
 
 **Recommendation:** Bucket único com chaves prefixadas por `videoId` (`videos/{videoId}/original.<ext>`, `videos/{videoId}/thumbnail.jpg`) — mais simples, sem teto de escala (ao contrário de bucket-por-vídeo) e sem provisionamento duplicado sem requisito (ao contrário de dois buckets). A chave reaproveita o mesmo UUID de TD-07, unificando identificador público e chave de storage — nenhuma tabela de mapeamento extra. Cliente SDK: AWS SDK v3 (`@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner`) sobre o pacote `minio`, tratando MinIO como substituto local de dev do protocolo S3 (`endpoint` customizado + `forcePathStyle: true`). Bucket privado por padrão; download força disposição de anexo na assinatura, streaming omite (inline) — mesma chave e endpoint, só muda o parâmetro. Novo namespace de config (padrão `registerAs`) e novo serviço `minio` em `compose.yaml` (bucket criado no boot).
 
-**Libraries:** @aws-sdk/client-s3, @aws-sdk/s3-request-presigner
+**Libraries:** @aws-sdk/client-s3@^3.1079.0, @aws-sdk/s3-request-presigner@^3.1079.0
 
 ### phase-03-videos/TD-04
 
 **Recommendation:** Topologia: mesmo codebase NestJS com dois bootstraps/containers — `nestjs-api` roda `main.ts` (servidor HTTP); um novo serviço `video-worker` usa a mesma imagem/Dockerfile com `command` diferente, bootando um `worker.ts` enxuto via `NestFactory.createApplicationContext(WorkerModule)` (sem listener HTTP, apenas o `Worker`/processor do BullMQ + TypeORM + client de storage). Bate com o container `Video Worker` separado do C4 sem duplicar entities/config/dependências. Invocação FFmpeg/ffprobe: `child_process.spawn` direto sobre os binários (`ffprobe` para metadados, `ffmpeg` para thumbnail), evitando o `fluent-ffmpeg` (sinalizado como não mantido). `Dockerfile.dev` instala `ffmpeg`; `video-worker` tem `depends_on: [db, redis, minio]`. Mitigar: smoke test `ffmpeg -version` no boot; timeout no `spawn` (kill após N min → falha, TD-09); dimensionar disco efêmero do worker para o pior caso (10GB) ou processar via stream.
 
 **Libraries:** ffmpeg/ffprobe (binários de sistema, instalados no Dockerfile; invocados via `node:child_process`)
+
+**Revisions:**
+
+- 2026-07-03 — Metadados extraídos via `ffprobe` e persistidos na entity `Video` fixados em: `duration` (int, segundos), `width`/`height` (int, px) e `size` (bigint, bytes). Rationale: conjunto mínimo útil que satisfaz a capability "extração de duração e metadados" (plural) sem modelar campos de transcoding (codec/bitrate) fora do escopo da Fase 03 — resolve AMB-1.
 
 ### phase-03-videos/TD-05
 
