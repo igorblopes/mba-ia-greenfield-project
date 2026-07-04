@@ -1,14 +1,29 @@
 # phase-03-videos — Progress
 
-**Status:** pending
-**SIs:** 0/10 completed
+**Status:** in_progress
+**SIs:** 1/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
-- **Status:** pending
+- **Status:** completed
 - **Objetivo:** Provisionar a infraestrutura Docker nova da fase (fila e storage) e o container do `video-worker`, além dos namespaces de configuração correspondentes — base para todos os SIs seguintes.
 - **Testes planejados:** _(vazio — Infra; validado por AC via `docker compose ps`/smoke checks, sem novo arquivo de teste)_
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+- **Resultado dos testes:**
+  - `docker compose up -d`: `redis`, `minio`, `video-worker` sobem sem erro, status `running`/`healthy` em `docker compose ps`.
+  - `ffmpeg -version` / `ffprobe -version` executam com sucesso em `nestjs-api` e `video-worker` (mesma imagem, `Dockerfile.dev`).
+  - MinIO acessível internamente em `http://minio:9000` (HTTP 200 a partir de `nestjs-api`); bucket `streamtube` criado automaticamente no boot pelo container `createbuckets` (`mc mb --ignore-existing`).
+  - Redis acessível internamente (`redis-cli ping` → `PONG`), persistência AOF confirmada (`CONFIG GET appendonly` → `yes`).
+  - Validação Joi confirmada diretamente no schema: payload sem `STORAGE_BUCKET`/`STORAGE_ACCESS_KEY_ID`/`STORAGE_SECRET_ACCESS_KEY` retorna erro `"... is required"` para os três; payload completo passa sem erro e aplica defaults (`REDIS_HOST=redis`, `REDIS_PORT=6379`).
+  - Regressão: `docker compose exec nestjs-api npm test -- config --runInBand` → 2 suites, 7/7 passing (`env.validation.integration-spec.ts`, `swagger.config.spec.ts`).
+  - `npx tsc --noEmit` → exit 0. `npm run lint` nos arquivos desta SI → 0 problemas (os 190 problemas reportados pelo lint completo do projeto são pré-existentes, em arquivos fora do escopo desta SI — ver observações).
+- **Notas de implementação:**
+  - `redis:8-alpine` e `minio/minio:RELEASE.2025-09-07T16-13-09Z` (tag fixada mais recente disponível; o repositório `minio/minio` foi arquivado pelo mantenedor em 2026-04-25, então esta é a última release existente) escolhidos via busca das tags reais no Docker Hub.
+  - Criação do bucket no boot implementada via serviço `createbuckets` (imagem `minio/mc:RELEASE.2025-08-13T08-35-41Z`, one-shot, `depends_on: minio (healthy)`) rodando `mc alias set` + `mc mb --ignore-existing` — abordagem de infra (compose), distinta da rotina defensiva `HeadBucket`/`CreateBucket` que a SI-03.3 adiciona no `StorageService`.
+  - `video-worker` não recebeu `command:` próprio nesta SI — herda o `CMD ["tail","-f","/dev/null"]` do `Dockerfile.dev` (mesmo padrão do `nestjs-api`), já que `src/worker.ts` só é criado na SI-03.6, que troca o `command` para o bootstrap compilado.
+  - `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` e o nome do bucket no `createbuckets` são alimentados via interpolação `${STORAGE_ACCESS_KEY_ID}`/`${STORAGE_SECRET_ACCESS_KEY}`/`${STORAGE_BUCKET}` do `.env`, evitando duplicar credenciais entre o serviço MinIO e a config da aplicação.
+  - `storage.config.ts`: `bucket`/`accessKeyId`/`secretAccessKey` sem default (obrigatórios via Joi, mesmo padrão de `DB_USERNAME`/`DB_PASSWORD`/`DB_NAME`); `endpoint`/`region` com default (mesmo padrão de `DB_HOST`/`DB_PORT`); `forcePathStyle: true` fixo no código (não vem de env, requisito do MinIO).
+  - **Fora do escopo, corrigido para destravar a verificação desta SI:** `.env.example` tinha `MAIL_FROM="StreamTube" <noreply@streamtube.com>` (Fase 02) sem aspas em volta do valor inteiro, violando a própria convenção documentada em `nestjs-project/CLAUDE.md` ("Environment File Conventions") e quebrando o parsing de `.env` pelo `docker compose config`/`up` (erro `unexpected character "<" in variable name`). Corrigido para `MAIL_FROM="StreamTube <noreply@streamtube.com>"` — bug pré-existente da Fase 02, não relacionado ao escopo de vídeos.
+  - **Regressão corrigida:** `env.validation.integration-spec.ts` tinha um fixture `requiredEnv` que não incluía os novos campos obrigatórios de storage; os 3 testes de `SWAGGER_ENABLED` quebraram. Corrigido adicionando `STORAGE_BUCKET`/`STORAGE_ACCESS_KEY_ID`/`STORAGE_SECRET_ACCESS_KEY` ao fixture (arquivo existente, não é "novo arquivo de teste").
+  - Ambiente local não tinha `.env` (apenas `.env.example`, `.env` é gitignored) nem Docker Desktop em execução — ambos endereçados para permitir a verificação (copiado `.env.example` → `.env`; Docker Desktop iniciado). `node_modules` do container `nestjs-api` estava com arquivos corrompidos (`@babel/generator`, `@types/node`) de uma sessão anterior — reinstalado (`rm -rf node_modules && npm install`) para permitir `tsc --noEmit` limpo; não relacionado ao código desta SI.
 
 ### SI-03.2 — Data model: entidade Video, migration, repository e relação com Channel
 - **Status:** pending

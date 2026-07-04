@@ -33,4 +33,63 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${STORAGE_ACCESS_KEY_ID:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  createbuckets:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 ${STORAGE_ACCESS_KEY_ID:-minioadmin} ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
+        mc mb --ignore-existing local/${STORAGE_BUCKET:-streamtube}
+
+  video-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/home/node/app
+    # No override yet — inherits Dockerfile.dev's idle CMD, same as nestjs-api,
+    # until the standalone worker bootstrap entrypoint exists.
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+  minio_data:
 
