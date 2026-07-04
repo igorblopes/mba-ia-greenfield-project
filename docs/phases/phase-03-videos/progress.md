@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 1/10 completed
+**SIs:** 2/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
 - **Status:** completed
@@ -26,12 +26,23 @@
   - Ambiente local não tinha `.env` (apenas `.env.example`, `.env` é gitignored) nem Docker Desktop em execução — ambos endereçados para permitir a verificação (copiado `.env.example` → `.env`; Docker Desktop iniciado). `node_modules` do container `nestjs-api` estava com arquivos corrompidos (`@babel/generator`, `@types/node`) de uma sessão anterior — reinstalado (`rm -rf node_modules && npm install`) para permitir `tsc --noEmit` limpo; não relacionado ao código desta SI.
 
 ### SI-03.2 — Data model: entidade Video, migration, repository e relação com Channel
-- **Status:** pending
+- **Status:** completed
 - **Objetivo:** Criar a entity `Video`, o módulo de vídeos e a migration correspondente, estabelecendo o schema base sobre o qual toda a fase é construída.
 - **Testes planejados:**
   - `Video` — Integration: PK uuid, `status` enum + default `'draft'`, FK `channel_id`, colunas nullable (`src/videos/entities/video.entity.integration-spec.ts`)
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+- **Resultado dos testes:**
+  - `docker compose exec nestjs-api npm test -- src/videos/entities/video.entity.integration-spec.ts --runInBand` → 6/6 passing (uuid PK, default `'draft'`, enum rejeita valor inválido, FK `channel_id` rejeitada quando inexistente, colunas nullable ficam `null`, relação `ManyToOne` carrega o `Channel`).
+  - `npm run migration:run` → cria `videos` + tipo `videos_status_enum` (verificado via SQL gerado pelo TypeORM CLI, revisado antes de aplicar).
+  - `npm run migration:revert` → desfaz a migration sem tabelas/tipos órfãos (`DROP TABLE "videos"` + `DROP TYPE "videos_status_enum"`, sem afetar `channels`/`users`/tokens); migration reaplicada em seguida para deixar o ambiente no estado esperado.
+  - `npx tsc --noEmit` → exit 0. `npx eslint` nos arquivos desta SI → exit 0.
+- **Notas de implementação:**
+  - Relação `Video → Channel` implementada unidirecional (`@ManyToOne` + `@JoinColumn({ name: 'channel_id' })`, com coluna escalar `channel_id` explícita), mesmo padrão de `RefreshToken`/`VerificationToken` → `User` (child record sem lado inverso na entidade pai). `Channel` não foi modificado — mantém Single Responsibility do módulo de canais; o plano também não pede lado inverso.
+  - `size` tipado como `string` (não `number`): colunas `bigint` do PostgreSQL são mapeadas pelo TypeORM como `string` no TypeScript, já que não cabem com segurança no range de `number` do JS (confirmado via doc oficial do TypeORM antes de implementar).
+  - Enum `VideoStatus` exportado do próprio `video.entity.ts` (mesmo padrão de `VerificationTokenType` em `verification-token.entity.ts`), não em arquivo separado.
+  - `VideosModule` criado apenas com `TypeOrmModule.forFeature([Video])`, sem `providers`/`exports` — não há `VideosService` nesta SI (fica para SI-03.4+); registrado em `AppModule` na posição após `AuthModule`.
+  - **Migration gerada em duas tentativas:** a primeira execução de `migration:generate` rodou contra um volume Docker novo (containers recriados nesta sessão), sem nenhuma migration prévia aplicada — o diff resultante recriava `channels`/`users`/`verification_tokens`/`refresh_tokens` do zero junto com `videos`. Descartada; rodado `migration:run` primeiro (aplicando as 2 migrations existentes da Fase 02) e então regenerada — resultado limpo, só `CREATE TYPE videos_status_enum` + `CREATE TABLE videos` + FK.
+  - **Decisão de escopo — helper de teste compartilhado:** `cleanAllTables` (`src/test/create-test-data-source.ts`) é reutilizado por 11 outros arquivos de teste (`auth`, `channels`, `users`) cujo `ALL_ENTITIES` não inclui `Video`; adicionar `DELETE FROM "videos"` diretamente nesse helper quebraria esses testes quando executados isoladamente ou antes do primeiro teste de vídeo (tabela ainda não sincronizada). Optou-se por um `DELETE FROM "videos"` local no `beforeEach` do próprio `video.entity.integration-spec.ts`, antes de chamar `cleanAllTables` — evita tocar em arquivos fora do escopo desta SI.
+  - Ambiente Docker (containers `db`/`redis`/`minio`/`nestjs-api`/`video-worker`/`mailpit`/`createbuckets`) precisou ser subido nesta sessão (`docker compose up -d`) — não estava rodando previamente.
 
 ### SI-03.3 — Storage service e URL pré-assinada de upload
 - **Status:** pending
