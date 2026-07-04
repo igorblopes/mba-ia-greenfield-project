@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigType } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
@@ -8,6 +9,7 @@ import appConfig from './config/app.config';
 import authConfig from './config/auth.config';
 import databaseConfig from './config/database.config';
 import mailConfig from './config/mail.config';
+import queueConfig from './config/queue.config';
 import storageConfig from './config/storage.config';
 import swaggerConfig from './config/swagger.config';
 import { envValidationSchema } from './config/env.validation';
@@ -22,6 +24,7 @@ import { VideosModule } from './videos/videos.module';
         authConfig,
         databaseConfig,
         mailConfig,
+        queueConfig,
         storageConfig,
         swaggerConfig,
       ],
@@ -40,6 +43,16 @@ import { VideosModule } from './videos/videos.module';
         database: dbConfig.name,
         autoLoadEntities: true,
         synchronize: false,
+      }),
+    }),
+    BullModule.forRootAsync({
+      inject: [queueConfig.KEY],
+      useFactory: (config: ConfigType<typeof queueConfig>) => ({
+        connection: { host: config.host, port: config.port },
+        defaultJobOptions: {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 1000 },
+        },
       }),
     }),
     AuthModule,

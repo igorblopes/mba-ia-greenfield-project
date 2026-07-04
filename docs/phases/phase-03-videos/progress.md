@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 4/10 completed
+**SIs:** 5/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
 - **Status:** completed
@@ -83,13 +83,22 @@
   - **Observação (não corrigida, fora do escopo):** `@typescript-eslint/unbound-method` dispara em qualquer `expect(mockedService.method).toHaveBeenCalledWith(...)` neste projeto (sem `eslint-plugin-jest` configurado para reconhecer mocks do Jest como seguros) — confirmado sistêmico: `src/auth/auth.service.spec.ts` sozinho tem 19 ocorrências do mesmo padrão, usando o idiom já estabelecido pelo próprio testing-guide do projeto. Os 5 erros em `videos.service.spec.ts` seguem essa mesma convenção pré-existente; corrigi-los exigiria uma mudança de config do ESLint em nível de projeto (fora do escopo de uma única SI).
 
 ### SI-03.5 — Confirmação de upload e publicação de job na fila
-- **Status:** pending
+- **Status:** completed
 - **Objetivo:** Concluir o multipart upload (ou o aborta) e, no caminho de sucesso, publicar o job de processamento na fila `video-processing` — ponte entre o upload e o worker.
 - **Testes planejados:**
   - `VideosService.completeUpload` / `abortUpload` — Unit: branches de posse/status, storage e fila mockados (`src/videos/videos.service.spec.ts`)
   - `VideosService.completeUpload` — Integration vs Redis real: job `process-video` publicado com payload correto (`src/videos/videos.service.integration-spec.ts`)
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+- **Resultado dos testes:**
+  - `docker compose exec nestjs-api npm test -- --runInBand src/videos/videos.service.spec.ts src/videos/videos.service.integration-spec.ts` → 13/13 passing (branches de posse/status/já-completo de `completeUpload` e `abortUpload`, mais o cenário de integração contra Redis real publicando o job com o payload correto).
+  - `docker compose exec nestjs-api npm run test:e2e -- --runInBand test/videos.e2e-spec.ts` → 11/11 passing, incluindo os 5 novos cenários do Test Spec (`nestjs-project/specs/videos-upload-complete.plan.md`): complete-upload sucesso + job publicado na fila real; segunda chamada de complete → 409 `VIDEO_NOT_DRAFT`; complete por não-dono → 403 `VIDEO_NOT_OWNED` sem publicar job; abort remove o registro e aborta o multipart no MinIO real; abort por não-dono → 403 mantendo o registro.
+  - Regressão: `npm test -- --runInBand --testPathIgnorePatterns=migrations.integration-spec.ts` → 26 suites, 168/168 passing; `npm run test:e2e -- --runInBand` → 4 suites, 63/63 passing (`app`, `auth`, `swagger`, `videos`). `migrations.integration-spec.ts` excluído da regressão por bug pré-existente não relacionado — ver observações.
+  - `npx tsc --noEmit` → exit 0. `npx eslint` nos arquivos desta SI → 0 problemas introduzidos (erros remanescentes `@typescript-eslint/unbound-method` em `videos.service.spec.ts` seguem o mesmo débito sistêmico pré-existente já documentado na SI-03.4, não introduzido por esta SI).
+- **Notas de implementação:**
+  - **Registro do BullMQ dividido entre `AppModule` e `VideosModule`, não só em `app.module.ts`:** o plano cita registrar `BullModule.forRoot`/`registerQueue` "em `src/app.module.ts`", mas por regras de DI do Nest um módulo só enxerga providers de módulos que ele mesmo importa — `VideosModule` não importa `AppModule`, então `@InjectQueue('video-processing')` em `VideosService` não resolveria se `registerQueue` ficasse só no `AppModule`. Implementado espelhando o padrão já usado para TypeORM: `BullModule.forRootAsync` (conexão global, via `queueConfig`) em `app.module.ts` — mesmo papel de `TypeOrmModule.forRootAsync` — e `BullModule.registerQueue({ name: 'video-processing' })` em `videos.module.ts`, mesmo papel de `TypeOrmModule.forFeature([Video])`. `queueConfig` (criado na SI-03.1, nunca registrado) foi adicionado ao array `load` do `ConfigModule.forRoot`.
+  - **`completeUpload` não transiciona `status` para `processing`:** a API Contract ("Response 200: status: 'draft' (transição para 'processing' ocorre quando o worker consome o job, TD-08)"), o TD-08 ("job de worker iniciado (consumido da fila) → processing") e o próprio Test Spec ("a transição para 'processing' só ocorre quando o worker consumir o job — fora do escopo desta rota") concordam explicitamente: esta SI não escreve `processing` no banco, isso é escopo da SI-03.6. Isso deixa a AC#2 (segunda chamada de `complete` no mesmo vídeo deve retornar 409 `VIDEO_NOT_DRAFT`) sem sinal óbvio, já que `status` continua `'draft'` depois do primeiro `complete`. Resolvido reaproveitando a coluna `upload_id` (já nullable) como o sinal de "upload já finalizado": `completeUpload` zera `upload_id` após concluir o multipart upload e publicar o job; `findOwnedDraft` (helper privado compartilhado por `completeUpload`/`abortUpload`) passa a exigir `status === 'draft' && upload_id != null`. Não introduz coluna nem migration nova.
+  - `CompleteUploadDto` (`src/videos/dto/complete-upload.dto.ts`) usa `class-validator` + `class-transformer` (`@ValidateNested({ each: true })` + `@Type(() => CompletedPartDto)`) para validar o array `parts: { part_number, etag }[]` — necessário porque o `ValidationPipe` global roda com `whitelist: true`/`forbidNonWhitelisted: true`, que descarta campos de objetos aninhados sem instanciação via `@Type`.
+  - `VideoNotDraftException` (409) adicionada a `src/common/exceptions/domain.exception.ts`; `VIDEO_PROCESSING_QUEUE_NAME`/`PROCESS_VIDEO_JOB_NAME` centralizados em `src/videos/videos.constants.ts`.
+  - **Achado fora do escopo desta SI, não corrigido (rastreado à parte):** `src/database/migrations.integration-spec.ts` (Fase 02, não tocado por esta branch) tem um bug de isolamento determinístico — seu `beforeAll` dropa as 4 tabelas geridas e a tabela `migrations`, mas nunca dropa o tipo Postgres `verification_tokens_type_enum` que a migration `CreateAuthTokens` cria; qualquer execução deste arquivo específico contra um banco onde esse tipo já exista (ou seja, a partir da segunda vez que o arquivo roda contra o mesmo Postgres, já que seu próprio `afterAll` recria o tipo ao reaplicar as migrations) falha com `type "verification_tokens_type_enum" already exists`. Confirmado não relacionado a esta branch (`git diff main --stat -- src/database/` mostra apenas a adição de `1783182351831-CreateVideos.ts`). O banco de desenvolvimento (ativo há várias sessões) foi resetado (`DROP SCHEMA public CASCADE` + recriação da extensão `uuid-ossp` + `npm run migration:run`) para destravar a verificação desta SI; a regressão final rodou com `--testPathIgnorePatterns=migrations.integration-spec.ts` para não mascarar o resultado real com essa falha pré-existente. Sinalizado como task separada (não corrigido aqui, fora do escopo de vídeos).
 
 ### SI-03.6 — Worker de processamento com FFmpeg/ffprobe
 - **Status:** pending
