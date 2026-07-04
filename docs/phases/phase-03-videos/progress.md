@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 3/10 completed
+**SIs:** 4/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
 - **Status:** completed
@@ -62,13 +62,25 @@
   - Testes de integração instanciam `StorageService` diretamente via `new StorageService(config)` (mesmo padrão de `ChannelsService` em `channels.service.integration-spec.ts`), sem `Test.createTestingModule`, e chamam `onModuleInit()` explicitamente — evita ambiguidade sobre se `TestingModule.compile()` dispara lifecycle hooks automaticamente.
 
 ### SI-03.4 — API de pré-cadastro do vídeo como draft
-- **Status:** pending
+- **Status:** completed
 - **Objetivo:** Expor o pré-cadastro do vídeo como rascunho (cria o registro `draft` e inicia o multipart upload) e a obtenção sob demanda da URL pré-assinada de cada parte.
 - **Testes planejados:**
   - `VideosService.createDraft` — Unit: branch `FILE_TOO_LARGE`, criação do draft, storage mockado (`src/videos/videos.service.spec.ts`)
   - `VideosService.createDraft` — Integration: persiste o registro `Video` com `status: 'draft'` (DB real) (`src/videos/videos.service.integration-spec.ts`)
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+  - Pipeline completo do endpoint (draft + upload-parts) — E2E via Test Spec `nestjs-project/specs/videos-draft.plan.md` (`test/videos.e2e-spec.ts`)
+- **Resultado dos testes:**
+  - `docker compose exec nestjs-api npm test -- --runInBand src/videos/videos.service.spec.ts src/videos/videos.service.integration-spec.ts src/channels/channels.service.integration-spec.ts` → 8/8 passing.
+  - `docker compose exec nestjs-api npm run test:e2e -- --runInBand test/videos.e2e-spec.ts` → 6/6 passing (draft criado com sucesso; rejeita `size` acima de 10GB com 413 `FILE_TOO_LARGE`; requer autenticação; URL de parte para o dono; 403 `VIDEO_NOT_OWNED` para não-dono; 404 `VIDEO_NOT_FOUND` para vídeo inexistente).
+  - Regressão: suíte completa de e2e (`npm run test:e2e -- --runInBand`) → 4 suites, 58/58 passing (`app`, `auth`, `swagger`, `videos`); batch de 7 outros arquivos `*.integration-spec.ts` que consomem `cleanAllTables` → 63/63 passing.
+  - `npx tsc --noEmit` → exit 0. `npx eslint` nos arquivos desta SI → limpo, exceto 5 erros `@typescript-eslint/unbound-method` em `videos.service.spec.ts` (ver observações — débito sistêmico pré-existente, não introduzido por esta SI).
+- **Notas de implementação:**
+  - Rota `GET /videos/:id/upload-parts/:partNumber` (retorno da URL pré-assinada por parte) foi implementada nesta SI junto com `POST /videos`, conforme o plano (`API Contracts` já cita esta rota como "SI-03.3, SI-03.4"); `complete-upload` (SI-03.5) não foi tocado.
+  - `ChannelsService.findByUserId(userId)` (novo método, `src/channels/channels.service.ts`) resolve o canal do usuário autenticado via `findOneByOrFail` — ausência é tratada como estado genuinamente excepcional (todo usuário autenticado tem exatamente 1 canal desde o registro na Fase 02), não um domain exception novo. Adicionado por necessidade desta SI (controller precisa resolver `channel_id` a partir do JWT) — não fazia parte do escopo original de Channels; testes de integração cobrindo o método (sucesso + ausência) adicionados a `channels.service.integration-spec.ts`.
+  - Chave de storage `videos/{videoId}/original.<ext>` construída em `VideosService` via `node:path.extname`, com fallback `'bin'` quando o `original_filename` não tem extensão.
+  - `size` validado (`≤ 10737418240`) inteiramente no `VideosService` (413 `FILE_TOO_LARGE`), não no DTO — o Error Catalog do plano distingue explicitamente esse caso de um erro de validação 400, então o DTO só valida `@IsInt() @IsPositive()`.
+  - **Bug destravado por esta SI, não introduzido por ela:** `cleanAllTables` (`src/test/create-test-data-source.ts`) apagava `channels` antes de `videos`; como `videos.channel_id` tem FK para `channels`, qualquer linha de vídeo remanescente de uma suíte anterior quebrava o `beforeEach` de **qualquer** outro arquivo que dependa do helper (reproduzido concretamente: rodar `videos.service.integration-spec.ts` e depois `channels.service.integration-spec.ts` em invocações separadas derrubava as 5 suítes de channels com `QueryFailedError` de FK). Corrigido adicionando `DELETE FROM "videos"` como primeira linha do helper compartilhado — diferente da SI-03.2 (que evitou tocar o helper porque a tabela ainda não existia de forma estável), aqui a tabela já é estável via migration, então a correção central é segura e elimina a necessidade do `DELETE FROM "videos"` local por arquivo.
+  - **Bug destravado por esta SI, não introduzido por ela:** `test/auth.e2e-spec.ts`, `test/app.e2e-spec.ts` e `test/swagger.e2e-spec.ts` (todos preexistentes) sofrem do mesmo timeout: o boot do `AppModule` completo (Postgres + MinIO reais, incluindo `StorageService.onModuleInit`) passou a exceder os 5000ms default do Jest em algum ponto após a SI-03.1/03.3 adicionarem essas conexões reais ao bootstrap, e nenhum desses arquivos declarava `jest.setTimeout(...)`. Descoberto ao rodar a suíte e2e completa como checagem de regressão desta SI. Corrigido adicionando `jest.setTimeout(30000)` no topo dos 3 arquivos (mesmo padrão aplicado em `test/videos.e2e-spec.ts`, que já nasceu com o timeout correto).
+  - **Observação (não corrigida, fora do escopo):** `@typescript-eslint/unbound-method` dispara em qualquer `expect(mockedService.method).toHaveBeenCalledWith(...)` neste projeto (sem `eslint-plugin-jest` configurado para reconhecer mocks do Jest como seguros) — confirmado sistêmico: `src/auth/auth.service.spec.ts` sozinho tem 19 ocorrências do mesmo padrão, usando o idiom já estabelecido pelo próprio testing-guide do projeto. Os 5 erros em `videos.service.spec.ts` seguem essa mesma convenção pré-existente; corrigi-los exigiria uma mudança de config do ESLint em nível de projeto (fora do escopo de uma única SI).
 
 ### SI-03.5 — Confirmação de upload e publicação de job na fila
 - **Status:** pending

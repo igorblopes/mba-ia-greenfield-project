@@ -8,6 +8,10 @@ import { DomainExceptionFilter } from '../src/common/filters/domain-exception.fi
 import { ValidationExceptionFilter } from '../src/common/filters/validation-exception.filter';
 import { buildSwaggerConfig } from '../src/swagger/swagger-document';
 
+// AppModule bootstrap connects to real Postgres + MinIO (StorageService.onModuleInit
+// ensures the bucket and lifecycle policy), which regularly exceeds Jest's 5s default hook timeout.
+jest.setTimeout(30000);
+
 async function createApp(withSwagger: boolean): Promise<INestApplication<App>> {
   const moduleFixture = await Test.createTestingModule({
     imports: [AppModule],

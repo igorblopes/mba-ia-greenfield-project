@@ -48,3 +48,25 @@ export class TokenReuseDetectedException extends DomainException {
     );
   }
 }
+
+export class FileTooLargeException extends DomainException {
+  constructor() {
+    super('FILE_TOO_LARGE', 413, 'File size exceeds the 10GB upload limit');
+  }
+}
+
+export class VideoNotFoundException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_FOUND', 404, 'Video not found');
+  }
+}
+
+export class VideoNotOwnedException extends DomainException {
+  constructor() {
+    super(
+      'VIDEO_NOT_OWNED',
+      403,
+      "Video does not belong to the authenticated user's channel",
+    );
+  }
+}
