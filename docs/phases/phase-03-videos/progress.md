@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 2/10 completed
+**SIs:** 3/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
 - **Status:** completed
@@ -45,13 +45,21 @@
   - Ambiente Docker (containers `db`/`redis`/`minio`/`nestjs-api`/`video-worker`/`mailpit`/`createbuckets`) precisou ser subido nesta sessão (`docker compose up -d`) — não estava rodando previamente.
 
 ### SI-03.3 — Storage service e URL pré-assinada de upload
-- **Status:** pending
+- **Status:** completed
 - **Objetivo:** Implementar o `StorageService` sobre o AWS SDK v3 configurado para o MinIO, cobrindo o ciclo completo do multipart upload e a geração de URLs pré-assinadas de leitura — base reutilizada por todos os endpoints HTTP da fase.
 - **Testes planejados:**
   - `StorageService` — Integration vs MinIO real: `createMultipartUpload`/`presignUploadPart`/`completeMultipartUpload`/`abortMultipartUpload` round-trip com bytes reais (`src/videos/storage.service.integration-spec.ts`)
   - `StorageService.presignGetObject` — Integration vs MinIO real: URL inline vs. `ResponseContentDisposition: attachment` (`src/videos/storage.service.integration-spec.ts`)
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+- **Resultado dos testes:**
+  - `docker compose exec nestjs-api npm test -- --runInBand src/videos/storage.service.integration-spec.ts` → 5/5 passing: round-trip completo de multipart upload com bytes reais e verificação do conteúdo baixado; abort remove partes órfãs (`completeMultipartUpload` subsequente rejeita com upload já abortado); `presignGetObject` sem `ResponseContentDisposition` retorna objeto inline (sem header `content-disposition`); com `responseContentDisposition: 'attachment; filename="video.mp4"'` retorna `content-disposition: attachment`; bucket auto-criado no boot quando ainda não existe (testado com um bucket novo e aleatório, não o bucket padrão já criado pelo `createbuckets`).
+  - `npx tsc --noEmit` → exit 0. `npx eslint` nos arquivos desta SI → exit 0 (após `--fix` para formatação Prettier).
+- **Notas de implementação:**
+  - `StorageService` (`src/videos/storage.service.ts`) instanciado com `S3Client` configurado via namespace `storage` (`endpoint`/`region`/`forcePathStyle`/credenciais do `storage.config.ts` criado na SI-03.1); métodos `createMultipartUpload`, `presignUploadPart`, `completeMultipartUpload`, `abortMultipartUpload` e `presignGetObject` (com `ResponseContentDisposition` opcional) recebem `key` já pronta — a montagem da chave `videos/{videoId}/original.<ext>` fica para a SI-03.4, que é quem conhece o `videoId`.
+  - `onModuleInit` (lifecycle hook assíncrono, `perf-async-hooks`) roda `ensureBucketExists` (via `HeadBucketCommand`; cria via `CreateBucketCommand` quando `$metadata.httpStatusCode === 404`) e depois `configureLifecyclePolicy`.
+  - TTLs e o prazo de expurgo de partes órfãs centralizados em `src/videos/storage.constants.ts` (`PRESIGNED_PUT_EXPIRES_IN_SECONDS = 3600`, `PRESIGNED_GET_EXPIRES_IN_SECONDS = 21600` conforme TD-06, `MULTIPART_UPLOAD_ABORT_DAYS = 7`) — nenhum desses valores é fixado explicitamente pelas TDs além do TTL de 6h do GET, então os demais foram escolhidos como default razoável.
+  - **Achado de compatibilidade MinIO, verificado empiricamente (não documentado nas TDs):** o MinIO (`minio/minio:RELEASE.2025-09-07T16-13-09Z`, mesma imagem da SI-03.1) rejeita com `InvalidArgument: The XML you provided was not well-formed or did not validate against our published schema` qualquer regra de lifecycle cujo único action seja `AbortIncompleteMultipartUpload` — confirmado isolando a variável (testado com `Filter` vazio, com `Filter.Prefix` não-vazio, e sem `Filter` algum; todos falham; a mesma regra combinada com um action `Expiration` é aceita). Real S3 aceita `AbortIncompleteMultipartUpload` isolado normalmente — é uma divergência específica desta versão do MinIO, não um bug do código. `configureLifecyclePolicy` agora tenta a chamada padrão S3 (mesmo formato que funcionaria contra AWS real) e, especificamente quando `error.name === 'InvalidArgument'`, loga um `Logger.warn` e segue o boot sem falhar — o MinIO já expira uploads multipart incompletos por conta própria via config `api.stale_uploads_expiry` (default 24h), então a proteção contra partes órfãs citada em TD-02 continua válida mesmo com a policy explícita do bucket falhando nesta versão. Qualquer outro tipo de erro em `configureLifecyclePolicy` ainda propaga normalmente.
+  - **Gap destravado desta SI, não modificado pela SI-03.1:** `storage.config.ts` (criado na SI-03.1) tinha `bucket`/`accessKeyId`/`secretAccessKey` sem non-null assertion (`process.env.STORAGE_BUCKET` etc., tipados como `string | undefined`), inconsistente com o padrão já usado em `auth.config.ts` (`process.env.JWT_SECRET!`) para os mesmos casos de env var obrigatória via Joi. Adicionado `!` aos três campos para alinhar ao padrão existente — sem essa mudança `npx tsc --noEmit` falha ao consumir o config tipado no `StorageService`. Também fora do escopo original da SI-03.1: `storageConfig` nunca tinha sido adicionado ao array `load` do `ConfigModule.forRoot` em `app.module.ts` (só `queueConfig` e `storageConfig` foram criados como arquivos, nenhum registrado) — adicionado `storageConfig` ao `load` (necessário para o `@Inject(storageConfig.KEY)` resolver); `queueConfig` continua não registrado, pois seu consumo (BullMQ) é escopo da SI-03.5.
+  - Testes de integração instanciam `StorageService` diretamente via `new StorageService(config)` (mesmo padrão de `ChannelsService` em `channels.service.integration-spec.ts`), sem `Test.createTestingModule`, e chamam `onModuleInit()` explicitamente — evita ambiguidade sobre se `TestingModule.compile()` dispara lifecycle hooks automaticamente.
 
 ### SI-03.4 — API de pré-cadastro do vídeo como draft
 - **Status:** pending
