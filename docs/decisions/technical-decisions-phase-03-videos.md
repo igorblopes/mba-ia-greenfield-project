@@ -48,6 +48,8 @@ _Subprojects in scope:_
 
 **Decision:** A (BullMQ + `@nestjs/bullmq`) — fila madura baseada em Redis, com módulo de integração oficialmente documentado pela NestJS e recursos nativos de retry/backoff/concorrência adequados a jobs longos de processamento de vídeo. Redis é aceito como nova infraestrutura por ser um único container leve de operar, frente ao degrau de maturidade de integração NestJS que separa esta opção de pg-boss.
 
+**Libraries:** `bullmq@^5.79.2`, `@nestjs/bullmq@^11.0.4`
+
 **Impact on Implementation:** Novo serviço `redis` em `nestjs-project/compose.yaml`. Novo namespace de configuração para a fila, seguindo o padrão `registerAs` já estabelecido (`phase-01/TD-03`). `AppModule` registra o módulo de fila do lado produtor; o Video Worker (TD-04) registra o consumidor correspondente. Nomes exatos de arquivos e variáveis de ambiente ficam para a etapa de implementação.
 
 **Risks & Mitigation:** Redis torna-se um ponto único de falha adicional para o pipeline de processamento — mitigado por `persistence` padrão do Redis (AOF/RDB) já suficiente neste estágio (sem requisito de alta disponibilidade no plano). Jobs perdidos em caso de crash do Redis sem persistência habilitada — mitigar configurando `appendonly yes` no serviço `redis` do compose.
@@ -118,6 +120,8 @@ _Subprojects in scope:_
 
 **Decision:** A (bucket único, chaves prefixadas por `videoId`, cliente AWS SDK v3) — evita o teto de cota de buckets por conta (Option C) e o provisionamento duplicado sem requisito correspondente no plano (Option B); a chave reaproveita o UUID de TD-07, unificando identificador público e chave de storage.
 
+**Libraries:** `@aws-sdk/client-s3@^3.1079.0`, `@aws-sdk/s3-request-presigner@^3.1079.0`
+
 **Impact on Implementation:** Novo namespace de configuração para storage (padrão `registerAs`), com as variáveis de conexão ao endpoint S3-compatível (credenciais, bucket, region, path-style). Novo serviço `minio` em `compose.yaml` com criação do bucket no boot. Download e streaming (TD-06) reaproveitam o mesmo mecanismo de GET pré-assinado: download força disposição de anexo na assinatura, streaming/playback omite esse parâmetro (inline) — mesma chave, mesmo endpoint, apenas o parâmetro de assinatura muda. Nomes exatos de arquivos e variáveis de ambiente ficam para a etapa de implementação.
 
 **Risks & Mitigation:** Credenciais MinIO hardcoded em dev vs. credenciais reais de S3 em produção — já mitigado pelo padrão `registerAs` + Joi validation já estabelecido (TD-01/TD-02 da Fase 01), sem necessidade de mecanismo novo. Bucket policy mal configurada expondo objetos publicamente antes do vídeo estar `ready` — mitigado por bucket privado por padrão + acesso exclusivamente via URL pré-assinada (TD-06), nunca ACL pública.
@@ -168,6 +172,12 @@ _Subprojects in scope:_
 **Recommendation:** **Option A (`child_process.spawn` direto)** — evita depender de um wrapper sinalizado como não mantido para um escopo de operações pequeno e estável; alinhado ao rótulo `"FFmpeg"` self-hosted do C4.
 
 **Decision:** A para as duas sub-decisões — (1) Topologia: mesmo codebase NestJS com dois bootstraps/containers (`nestjs-api` via `main.ts`, Video Worker via um bootstrap standalone), evitando duplicar entities/config em um segundo subprojeto; (2) Invocação FFmpeg/ffprobe: `child_process.spawn` direto sobre os binários, evitando a dependência não mantida do `fluent-ffmpeg`.
+
+**Libraries:** `ffmpeg`/`ffprobe` (binários de sistema instalados no `Dockerfile.dev` via apt; invocados por `node:child_process.spawn` — não é dependência npm, não versionada em `package.json`)
+
+**Revisions:**
+
+- 2026-07-03 — Metadados extraídos via `ffprobe` e persistidos na entity `Video` fixados em: `duration` (int, segundos), `width`/`height` (int, px) e `size` (bigint, bytes). Rationale: conjunto mínimo útil que satisfaz a capability "extração de duração e metadados" (plural) sem modelar campos de transcoding (codec/bitrate) fora do escopo da Fase 03 — resolve AMB-1.
 
 **Impact on Implementation:** Novo serviço `video-worker` em `compose.yaml` (mesma imagem/build de `nestjs-api`, `command` diferente, `depends_on: [db, redis, minio]`). Dockerfile (dev e produção) precisa instalar `ffmpeg` (fornece ambos os binários `ffmpeg` e `ffprobe`). Worker baixa o objeto original do storage (ou processa via stream, a definir na implementação), roda ffprobe, roda ffmpeg para thumbnail, sobe o resultado ao storage (TD-03), atualiza o registro do vídeo (TD-08) via TypeORM.
 
