@@ -79,8 +79,7 @@ services:
       dockerfile: Dockerfile.dev
     volumes:
       - .:/home/node/app
-    # No override yet — inherits Dockerfile.dev's idle CMD, same as nestjs-api,
-    # until the standalone worker bootstrap entrypoint exists.
+    command: sh -c "npm run build && npm run start:worker"
     depends_on:
       db:
         condition: service_healthy

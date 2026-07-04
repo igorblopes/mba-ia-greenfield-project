@@ -1,4 +1,3 @@
-import { extname } from 'node:path';
 import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -15,6 +14,7 @@ import { CreateVideoDto } from './dto/create-video.dto';
 import { Video, VideoStatus } from './entities/video.entity';
 import { StorageService } from './storage.service';
 import { PRESIGNED_PUT_EXPIRES_IN_SECONDS } from './storage.constants';
+import { buildOriginalKey } from './video-storage-key.util';
 import {
   MAX_VIDEO_SIZE_BYTES,
   PROCESS_VIDEO_JOB_NAME,
@@ -69,7 +69,7 @@ export class VideosService {
       }),
     );
 
-    const key = this.buildOriginalKey(video.id, dto.original_filename);
+    const key = buildOriginalKey(video.id, dto.original_filename);
     const uploadId = await this.storageService.createMultipartUpload(
       key,
       dto.content_type,
@@ -94,7 +94,7 @@ export class VideosService {
       throw new VideoNotOwnedException();
     }
 
-    const key = this.buildOriginalKey(video.id, video.original_filename);
+    const key = buildOriginalKey(video.id, video.original_filename);
     const url = await this.storageService.presignUploadPart(
       key,
       video.upload_id!,
@@ -115,7 +115,7 @@ export class VideosService {
   ): Promise<CompleteUploadResult> {
     const video = await this.findOwnedDraft(channelId, videoId);
 
-    const key = this.buildOriginalKey(video.id, video.original_filename);
+    const key = buildOriginalKey(video.id, video.original_filename);
     await this.storageService.completeMultipartUpload(
       key,
       video.upload_id!,
@@ -141,7 +141,7 @@ export class VideosService {
   async abortUpload(channelId: string, videoId: string): Promise<void> {
     const video = await this.findOwnedDraft(channelId, videoId);
 
-    const key = this.buildOriginalKey(video.id, video.original_filename);
+    const key = buildOriginalKey(video.id, video.original_filename);
     await this.storageService.abortMultipartUpload(key, video.upload_id!);
 
     await this.videoRepository.remove(video);
@@ -162,10 +162,5 @@ export class VideosService {
       throw new VideoNotDraftException();
     }
     return video;
-  }
-
-  private buildOriginalKey(videoId: string, originalFilename: string): string {
-    const ext = extname(originalFilename).slice(1) || 'bin';
-    return `videos/${videoId}/original.${ext}`;
   }
 }
