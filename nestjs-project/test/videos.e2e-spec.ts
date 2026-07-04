@@ -1,5 +1,7 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { getQueueToken } from '@nestjs/bullmq';
 import { Test } from '@nestjs/testing';
+import { Queue } from 'bullmq';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
@@ -9,6 +11,12 @@ import { AuthService } from '../src/auth/auth.service';
 import { DomainExceptionFilter } from '../src/common/filters/domain-exception.filter';
 import { ValidationExceptionFilter } from '../src/common/filters/validation-exception.filter';
 import { cleanAllTables } from '../src/test/create-test-data-source';
+import { StorageService } from '../src/videos/storage.service';
+import type { ProcessVideoJobPayload } from '../src/videos/videos.service';
+import {
+  PROCESS_VIDEO_JOB_NAME,
+  VIDEO_PROCESSING_QUEUE_NAME,
+} from '../src/videos/videos.constants';
 
 // AppModule bootstrap connects to real Postgres + MinIO (StorageService.onModuleInit
 // ensures the bucket and lifecycle policy), which regularly exceeds Jest's 5s default hook timeout.
@@ -40,6 +48,11 @@ interface UploadPartResponseBody {
   expires_in: number;
 }
 
+interface CompleteUploadResponseBody {
+  id: string;
+  status: string;
+}
+
 interface MeResponseBody {
   sub: string;
 }
@@ -52,6 +65,7 @@ describe('Videos (e2e)', () => {
   let app: INestApplication<App>;
   let dataSource: DataSource;
   let throttlerStorage: ThrottlerStorageService;
+  let queue: Queue<ProcessVideoJobPayload>;
 
   beforeAll(async () => {
     const moduleFixture = await Test.createTestingModule({
@@ -75,6 +89,9 @@ describe('Videos (e2e)', () => {
     dataSource = moduleFixture.get(DataSource);
     throttlerStorage =
       moduleFixture.get<ThrottlerStorageService>(ThrottlerStorage);
+    queue = moduleFixture.get<Queue<ProcessVideoJobPayload>>(
+      getQueueToken(VIDEO_PROCESSING_QUEUE_NAME),
+    );
   });
 
   afterAll(async () => {
@@ -84,7 +101,34 @@ describe('Videos (e2e)', () => {
   beforeEach(async () => {
     await cleanAllTables(dataSource);
     throttlerStorage.storage.clear();
+    await queue.obliterate({ force: true });
   });
+
+  async function uploadPartAndGetEtag(
+    accessToken: string,
+    videoId: string,
+    partNumber: number,
+    body: Buffer,
+  ): Promise<string> {
+    const partRes = await request(app.getHttpServer())
+      .get(`/videos/${videoId}/upload-parts/${partNumber}`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    const { url } = partRes.body as UploadPartResponseBody;
+
+    const uploadRes = await fetch(url, {
+      method: 'PUT',
+      body: new Uint8Array(body),
+    });
+    expect(uploadRes.status).toBe(200);
+    const etag = uploadRes.headers.get('etag');
+    if (!etag) {
+      throw new Error(
+        'MinIO did not return an ETag header for the uploaded part',
+      );
+    }
+    return etag;
+  }
 
   async function captureConfirmationToken(
     email: string,
@@ -253,6 +297,173 @@ describe('Videos (e2e)', () => {
       const body = res.body as ErrorResponseBody;
 
       expect(body.error).toBe('VIDEO_NOT_FOUND');
+    });
+  });
+
+  describe('POST /videos/:id/complete', () => {
+    // 1.1 complete-upload-sucesso-publica-job
+    it('completes the upload and publishes a process-video job', async () => {
+      const ownerToken = await registerConfirmAndLogin(
+        'complete-owner@example.com',
+      );
+      const draftRes = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send(validDraftPayload)
+        .expect(201);
+      const draftBody = draftRes.body as DraftResponseBody;
+
+      const etag = await uploadPartAndGetEtag(
+        ownerToken,
+        draftBody.id,
+        1,
+        Buffer.from('complete-upload-e2e-bytes'),
+      );
+
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${draftBody.id}/complete`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ parts: [{ part_number: 1, etag }] })
+        .expect(200);
+      const body = res.body as CompleteUploadResponseBody;
+
+      expect(body.id).toBe(draftBody.id);
+      expect(body.status).toBe('draft');
+
+      const jobs = await queue.getJobs(['waiting', 'active', 'delayed']);
+      const publishedJob = jobs.find(
+        (job) => job.data.videoId === draftBody.id,
+      );
+      expect(publishedJob).toBeDefined();
+      expect(publishedJob!.name).toBe(PROCESS_VIDEO_JOB_NAME);
+      expect(publishedJob!.data).toEqual({ videoId: draftBody.id });
+    });
+
+    // 1.2 complete-upload-video-ja-nao-draft-retorna-409
+    it('returns 409 VIDEO_NOT_DRAFT when completed a second time', async () => {
+      const ownerToken = await registerConfirmAndLogin(
+        'complete-twice@example.com',
+      );
+      const draftRes = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send(validDraftPayload)
+        .expect(201);
+      const draftBody = draftRes.body as DraftResponseBody;
+      const etag = await uploadPartAndGetEtag(
+        ownerToken,
+        draftBody.id,
+        1,
+        Buffer.from('complete-twice-e2e-bytes'),
+      );
+      const parts = [{ part_number: 1, etag }];
+
+      await request(app.getHttpServer())
+        .post(`/videos/${draftBody.id}/complete`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ parts })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${draftBody.id}/complete`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ parts })
+        .expect(409);
+      const body = res.body as ErrorResponseBody;
+
+      expect(body.error).toBe('VIDEO_NOT_DRAFT');
+    });
+
+    // 1.3 complete-upload-nao-owner-retorna-403
+    it('returns 403 VIDEO_NOT_OWNED when called by a non-owner', async () => {
+      const ownerToken = await registerConfirmAndLogin(
+        'complete-owner2@example.com',
+      );
+      const otherToken = await registerConfirmAndLogin(
+        'complete-other@example.com',
+      );
+      const draftRes = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send(validDraftPayload)
+        .expect(201);
+      const draftBody = draftRes.body as DraftResponseBody;
+
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${draftBody.id}/complete`)
+        .set('Authorization', `Bearer ${otherToken}`)
+        .send({ parts: [{ part_number: 1, etag: '"whatever"' }] })
+        .expect(403);
+      const body = res.body as ErrorResponseBody;
+
+      expect(body.error).toBe('VIDEO_NOT_OWNED');
+
+      const jobs = await queue.getJobs(['waiting', 'active', 'delayed']);
+      expect(jobs.some((job) => job.data.videoId === draftBody.id)).toBe(false);
+    });
+  });
+
+  describe('DELETE /videos/:id', () => {
+    // 2.1 abort-upload-sucesso-remove-registro
+    it('deletes the draft and aborts the multipart upload on storage', async () => {
+      const ownerToken = await registerConfirmAndLogin(
+        'abort-owner@example.com',
+      );
+      const draftRes = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send(validDraftPayload)
+        .expect(201);
+      const draftBody = draftRes.body as DraftResponseBody;
+
+      await request(app.getHttpServer())
+        .delete(`/videos/${draftBody.id}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .expect(204);
+
+      const rows = await dataSource.query<unknown[]>(
+        'SELECT * FROM "videos" WHERE id = $1',
+        [draftBody.id],
+      );
+      expect(rows).toHaveLength(0);
+
+      const storageService = app.get(StorageService);
+      const key = `videos/${draftBody.id}/original.mp4`;
+      await expect(
+        storageService.completeMultipartUpload(key, draftBody.upload_id, [
+          { ETag: '"whatever"', PartNumber: 1 },
+        ]),
+      ).rejects.toThrow();
+    });
+
+    // 2.2 abort-upload-nao-owner-retorna-403
+    it('returns 403 VIDEO_NOT_OWNED when called by a non-owner', async () => {
+      const ownerToken = await registerConfirmAndLogin(
+        'abort-owner2@example.com',
+      );
+      const otherToken = await registerConfirmAndLogin(
+        'abort-other@example.com',
+      );
+      const draftRes = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send(validDraftPayload)
+        .expect(201);
+      const draftBody = draftRes.body as DraftResponseBody;
+
+      const res = await request(app.getHttpServer())
+        .delete(`/videos/${draftBody.id}`)
+        .set('Authorization', `Bearer ${otherToken}`)
+        .expect(403);
+      const body = res.body as ErrorResponseBody;
+
+      expect(body.error).toBe('VIDEO_NOT_OWNED');
+
+      const rows = await dataSource.query<unknown[]>(
+        'SELECT * FROM "videos" WHERE id = $1',
+        [draftBody.id],
+      );
+      expect(rows).toHaveLength(1);
     });
   });
 });
