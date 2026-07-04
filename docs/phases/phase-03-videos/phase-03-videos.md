@@ -106,7 +106,7 @@ Implementar o pipeline completo de upload e processamento de vídeos da StreamTu
 ### SI-03.4 — API de pré-cadastro do vídeo como draft
 
 **Route:** POST /videos, GET /videos/:id/upload-parts/:partNumber
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-draft.plan.md`
 **Authorization:** POST /videos — Authenticated. GET .../upload-parts/:partNumber — Authenticated + Owner (`video.channel_id` do usuário autenticado)
 
 **Description:** Expõe o pré-cadastro do vídeo como rascunho (cria o registro `draft` e inicia o multipart upload) e a obtenção sob demanda da URL pré-assinada de cada parte.
@@ -142,7 +142,7 @@ Implementar o pipeline completo de upload e processamento de vídeos da StreamTu
 ### SI-03.5 — Confirmação de upload e publicação de job na fila
 
 **Route:** POST /videos/:id/complete, DELETE /videos/:id
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-upload-complete.plan.md`
 **Authorization:** Authenticated + Owner (`video.channel_id` do usuário autenticado) em ambas as rotas
 
 **Description:** Conclui o multipart upload (ou o aborta) e, no caminho de sucesso, publica o job de processamento na fila `video-processing` — ponte entre o upload e o worker.
@@ -236,7 +236,7 @@ Implementar o pipeline completo de upload e processamento de vídeos da StreamTu
 ### SI-03.8 — Endpoint de streaming com Range/206
 
 **Route:** GET /videos/:id/play
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-play.plan.md`
 **Authorization:** Public (`@Public()`) — vídeo `ready` assistível por anônimos (`phase-03-videos/TD-06`)
 
 **Description:** Expõe a URL pré-assinada de reprodução — o streaming com `Range`/`206` é resolvido inteiramente pelo protocolo `GetObject` do storage, sem parsing de `Range` no NestJS.
@@ -268,7 +268,7 @@ Implementar o pipeline completo de upload e processamento de vídeos da StreamTu
 ### SI-03.9 — Endpoint de download
 
 **Route:** GET /videos/:id/download
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-download.plan.md`
 **Authorization:** Public (`@Public()`) — mesma URL pré-assinada do streaming, variando apenas o parâmetro de disposição (`phase-03-videos/TD-03`)
 
 **Description:** Expõe a URL pré-assinada de download — mesma chave e endpoint do streaming, forçando `ResponseContentDisposition: attachment`.
