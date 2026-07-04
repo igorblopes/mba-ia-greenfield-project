@@ -1,3 +1,6 @@
+import { createWriteStream } from 'node:fs';
+import type { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
@@ -128,6 +131,16 @@ export class StorageService implements OnModuleInit {
     return getSignedUrl(this.s3, command, {
       expiresIn: PRESIGNED_GET_EXPIRES_IN_SECONDS,
     });
+  }
+
+  async downloadObject(key: string, destinationPath: string): Promise<void> {
+    const { Body } = await this.s3.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+    );
+    if (!Body) {
+      throw new Error(`GetObject did not return a body for key "${key}"`);
+    }
+    await pipeline(Body as Readable, createWriteStream(destinationPath));
   }
 
   private async ensureBucketExists(): Promise<void> {
