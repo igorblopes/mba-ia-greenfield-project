@@ -13,6 +13,10 @@ import { DomainExceptionFilter } from '../src/common/filters/domain-exception.fi
 import { ValidationExceptionFilter } from '../src/common/filters/validation-exception.filter';
 import { cleanAllTables } from '../src/test/create-test-data-source';
 
+// AppModule bootstrap connects to real Postgres + MinIO (StorageService.onModuleInit
+// ensures the bucket and lifecycle policy), which regularly exceeds Jest's 5s default hook timeout.
+jest.setTimeout(30000);
+
 describe('Auth (e2e)', () => {
   let app: INestApplication<App>;
   let dataSource: DataSource;
