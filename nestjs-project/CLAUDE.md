@@ -13,8 +13,10 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **MinIO:** `docker compose ps minio` — expect `healthy` (healthcheck hits `/minio/health/live`)
 
-Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
+Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment". `video-worker` is the exception: unlike `nestjs-api`'s dev server, it always runs its compiled bootstrap (`npm run build && npm run start:worker`) as part of `docker compose up -d`, since the worker has no interactive dev mode to opt out of.
 
 ## Development Environment
 
@@ -34,6 +36,10 @@ docker compose exec nestjs-api npm run start:dev
 Services:
 - `nestjs-api` — NestJS API, port `3000`
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `redis` — Redis 8, port `6379` — BullMQ queue backend (video processing jobs)
+- `minio` — MinIO, ports `9000` (S3 API) / `9001` (console) — S3-compatible object storage for video files and thumbnails
+- `video-worker` — separate container (same image as `nestjs-api`), consumes the `video-processing` queue; runs the compiled bootstrap (`npm run build && npm run start:worker`), no hot-reload
+- `ffmpeg`/`ffprobe` — installed in `Dockerfile.dev`, available in both `nestjs-api` and `video-worker`; used for thumbnail generation and metadata extraction
 
 All verification and teardown commands run on the **host machine**:
 
@@ -114,6 +120,8 @@ Choose the suffix by what the test really does, not by where the code under test
 A test that constructs a `TypeOrmModule.forRoot`, opens a connection, or hits the `db` service **must** be `*.integration-spec.ts`, never `*.spec.ts`. A test that boots the full Nest application and makes HTTP calls **must** be `*.e2e-spec.ts`.
 
 Conventions for **how to write** each kind of test (mocking patterns, AAA structure, override strategies for global guards, etc.) live in `.claude/rules/nestjs-testing.md` and load when you edit a test file.
+
+Integration/E2E specs that exercise the video pipeline run real `ffmpeg`/`ffprobe` against real MinIO — small committed fixture files (few KB, 1-3s) live in `test/fixtures/`. Never add large (near-10GB) fixtures; generate new ones with `ffmpeg -f lavfi -i "color=c=<color>:s=320x240:d=2" ...` (see existing fixtures for the exact invocation).
 
 ## Jest Configuration
 
