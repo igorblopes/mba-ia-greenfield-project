@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 6/10 completed
+**SIs:** 7/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
 - **Status:** completed
@@ -122,14 +122,28 @@
   - `compose.yaml`: `command` do `video-worker` trocado de idle (`tail -f /dev/null`, herdado do `Dockerfile.dev`) para `sh -c "npm run build && npm run start:worker"` — builda e roda o bootstrap compilado a cada subida do container (sem hot-reload, diferente do fluxo de dev do `nestjs-api`), conforme pedido explicitamente pelo plano ("bootstrap compilado de `src/worker.ts`"). Novo script `"start:worker": "node dist/worker"` adicionado a `package.json`, espelhando o padrão já existente de `"start:prod": "node dist/main"`.
 
 ### SI-03.7 — Thumbnail, metadados e transição para ready/error
-- **Status:** pending
+- **Status:** completed
 - **Objetivo:** Completar o pipeline do worker — geração de thumbnail via `ffmpeg`, persistência final dos metadados e a transição de status para `'ready'` ou `'error'` conforme o resultado do processamento.
 - **Testes planejados:**
   - `ffmpeg-thumbnail.util` — Unit: cálculo do offset + clamp para vídeos curtos (`src/worker/ffmpeg-thumbnail.util.spec.ts`)
   - `VideoProcessor` — Integration vs `ffmpeg`/MinIO/Redis reais + fixture: caminho feliz termina em `status: 'ready'` com thumbnail no storage e metadados persistidos (`src/worker/video.processor.integration-spec.ts`)
   - `VideoProcessor` — Integration: fixture corrompida esgota os retries e termina em `status: 'error'` com `error_message` populado (`src/worker/video.processor.integration-spec.ts`)
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+- **Resultado dos testes:**
+  - `docker compose exec nestjs-api npm test -- --runInBand src/worker/ffmpeg-thumbnail.util.spec.ts src/worker/video.processor.integration-spec.ts` → 7/7 passing: 4 casos de `calculateThumbnailOffset` (ratio normal, floor em 1s, clamp para vídeo de 1s, clamp para vídeo de 0.5s); pipeline feliz completo termina `status: 'ready'` com `duration`/`width`/`height`/`size` persistidos e thumbnail real baixável do MinIO; retry de um vídeo já `'processing'` não reverte para `'draft'` e ainda completa para `'ready'`; fixture corrompida esgota as 3 tentativas (backoff exponencial) e termina `status: 'error'` com `error_message` populado com o erro real do `ffprobe`. Confirmado estável em 2 execuções consecutivas após a correção de isolamento de fila (ver observações).
+  - Regressão dos arquivos compartilhados tocados por esta SI: `docker compose exec nestjs-api npm test -- --runInBand src/videos/storage.service.integration-spec.ts src/videos/videos.service.spec.ts src/videos/videos.service.integration-spec.ts` → 18/18 passing.
+  - Regressão completa: `npm test -- --runInBand --testPathIgnorePatterns=migrations.integration-spec.ts` → 29 suites, 177/177 passing; `npm run test:e2e -- --runInBand` → 4 suites, 63/63 passing (`app`, `auth`, `swagger`, `videos`). `migrations.integration-spec.ts` excluído pelo mesmo bug pré-existente já documentado na SI-03.5 (não relacionado a esta branch).
+  - `npx tsc --noEmit` → exit 0. `npx eslint` nos 6 arquivos desta SI → 0 problemas (2 erros `prettier/prettier` de formatação encontrados na primeira passada, corrigidos manualmente).
+- **Notas de implementação:**
+  - `VideoProcessor.process()` estendido: após o `ffprobe`, gera o frame de thumbnail via `ffmpeg-thumbnail.util` (`offset = max(1, duration*0.1)`, clamp `min(offset, duration-0.1)`), envia para `videos/{videoId}/thumbnail.jpg` via `StorageService.uploadObject` (novo método), persiste `duration`/`width`/`height`/`size` (convertido para `string`, coluna `bigint`) e `status: 'ready'`.
+  - **Detecção de "última tentativa esgotada" (TD-09), verificada via context7 antes de implementar:** `job.attemptsStarted >= (job.opts.attempts ?? 1)` — padrão oficial do BullMQ (`docs/gitbook/patterns/stop-retrying-jobs.md`, mesmo usado internamente pelo `UnrecoverableError`). `attemptsStarted` incrementa a cada vez que o job é movido para `active` (ou seja, já reflete a tentativa corrente dentro do próprio `process()`), diferente de `attemptsMade` (incrementado só depois que o erro já foi lançado). Só na tentativa final o `catch` persiste `video.status = 'error'` e `video.error_message` (mensagem real capturada); o erro é sempre relançado (`throw error`) independente da tentativa, preservando o bookkeeping nativo de retry/backoff do BullMQ.
+  - `StorageService.uploadObject(key, filePath, contentType)` (novo método) usa `readFile` (buffer completo em memória), diferente do `downloadObject` que usa stream — decisão verificada via context7 (`aws-sdk-js-v3`): `PutObjectCommand` com `Body` do tipo `Readable` exige `ContentLength` explícito ou o helper `@aws-sdk/lib-storage` `Upload`; como o thumbnail é um único frame JPEG (não o vídeo original de até 10GB), bufferizar é seguro e evita essa complexidade.
+  - `ffmpeg-thumbnail.util.ts`: `FFMPEG_TIMEOUT_MS` (5 min) como constante local, espelhando o padrão já estabelecido por `FFPROBE_TIMEOUT_MS` em `ffprobe.util.ts` (SI-03.6) — não extraído para um arquivo de constantes compartilhado, mesma convenção. Flag `-y` adicionada aos argumentos do `ffmpeg` (não está no exemplo literal do plano) para evitar um hang de confirmação interativa de overwrite caso um arquivo de thumbnail temporário remanescente de uma tentativa anterior travada ainda exista no disco.
+  - Arquivos temporários locais (original baixado + thumbnail gerado) limpos em um único bloco `finally` do `process()`, cobrindo sucesso e falha.
+  - `buildThumbnailKey(videoId)` adicionado a `video-storage-key.util.ts`, ao lado do já existente `buildOriginalKey`.
+  - **Evolução esperada dos 2 testes já existentes de SI-03.6 em `video.processor.integration-spec.ts`, não uma correção de bug de SI anterior:** a própria SI-03.6 documentou explicitamente que thumbnail/`ready` ficavam para esta SI; os 2 testes que antes verificavam `status: 'processing'` como estado final de um processamento bem-sucedido foram atualizados para `status: 'ready'`, já que agora o pipeline completo sempre avança até lá. O arquivo é o mesmo citado na tabela de Testes desta própria SI-03.7, então estendê-lo é esperado, não um retrofit de escopo alheio.
+  - O novo teste de fixture corrompida escuta especificamente o evento `'failed'` da tentativa final (`job.attemptsStarted >= job.opts.attempts`, mesmo critério usado no código de produção) em vez do primeiro `worker.once('failed', ...)`, já que tentativas intermediárias de retry também emitem `'failed'`.
+  - **Achado de isolamento de teste, corrigido para destravar a verificação desta SI (fora do escopo de negócio, não é bug de SI anterior):** o `Queue`/`Worker` locais de `video.processor.integration-spec.ts` usavam a constante de produção `VIDEO_PROCESSING_QUEUE_NAME` desde a SI-03.6 — como o container `video-worker` roda de verdade desde que a SI-03.6 trocou seu `command` de idle para o bootstrap compilado, ele compete pelos mesmos jobs que o `Worker` local do teste. Quem vencer a corrida processa o job, mas o teste só aguarda eventos no seu próprio `Worker` — se o container vencer, o teste trava até o timeout de 30s. Comportamento não-determinístico confirmado na prática nesta sessão (7/7 passou numa primeira rodada, depois 2/3 falharam por timeout numa rodada seguinte, sem nenhuma mudança de lógica entre elas — só reflete a corrida). Corrigido isolando o teste em uma fila própria (`video-processing-test-video-processor-spec`, só usada pelo `Queue`/`Worker` locais deste arquivo); estabilidade confirmada em 2 execuções completas consecutivas após a correção.
+  - Ambiente: Docker Desktop não estava em execução nesta sessão — iniciado, e `docker compose up -d` recriou os containers antes da verificação.
 
 ### SI-03.8 — Endpoint de streaming com Range/206
 - **Status:** pending

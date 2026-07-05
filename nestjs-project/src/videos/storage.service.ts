@@ -1,4 +1,5 @@
 import { createWriteStream } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
@@ -9,6 +10,7 @@ import {
   GetObjectCommand,
   HeadBucketCommand,
   PutBucketLifecycleConfigurationCommand,
+  PutObjectCommand,
   S3Client,
   UploadPartCommand,
 } from '@aws-sdk/client-s3';
@@ -131,6 +133,22 @@ export class StorageService implements OnModuleInit {
     return getSignedUrl(this.s3, command, {
       expiresIn: PRESIGNED_GET_EXPIRES_IN_SECONDS,
     });
+  }
+
+  async uploadObject(
+    key: string,
+    filePath: string,
+    contentType: string,
+  ): Promise<void> {
+    const body = await readFile(filePath);
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+      }),
+    );
   }
 
   async downloadObject(key: string, destinationPath: string): Promise<void> {

@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigType } from '@nestjs/config';
-import { Queue, Worker } from 'bullmq';
+import { Job, Queue, Worker } from 'bullmq';
 import { DataSource, Repository } from 'typeorm';
 import { Channel } from '../channels/entities/channel.entity';
 import storageConfig from '../config/storage.config';
@@ -15,11 +15,11 @@ import {
 import { User } from '../users/entities/user.entity';
 import { Video, VideoStatus } from '../videos/entities/video.entity';
 import { StorageService } from '../videos/storage.service';
-import { buildOriginalKey } from '../videos/video-storage-key.util';
 import {
-  PROCESS_VIDEO_JOB_NAME,
-  VIDEO_PROCESSING_QUEUE_NAME,
-} from '../videos/videos.constants';
+  buildOriginalKey,
+  buildThumbnailKey,
+} from '../videos/video-storage-key.util';
+import { PROCESS_VIDEO_JOB_NAME } from '../videos/videos.constants';
 import type { ProcessVideoJobPayload } from '../videos/videos.service';
 import type { VideoMetadata } from './ffprobe.util';
 import { VideoProcessor } from './video.processor';
@@ -29,6 +29,12 @@ import { VideoProcessor } from './video.processor';
 jest.setTimeout(30000);
 
 const ALL_ENTITIES = [User, Channel, Video];
+
+// Uses a dedicated queue name (not the production VIDEO_PROCESSING_QUEUE_NAME)
+// so this test's local Worker doesn't race the always-running video-worker
+// container for the same jobs — otherwise whichever wins claims the job, but
+// only this test's own worker instance is awaited for completion/failure.
+const TEST_QUEUE_NAME = 'video-processing-test-video-processor-spec';
 
 function buildStorageTestConfig(): ConfigType<typeof storageConfig> {
   return {
@@ -73,6 +79,7 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
   let worker: Worker<ProcessVideoJobPayload, VideoMetadata>;
   let fixtureDir: string;
   let fixturePath: string;
+  let corruptedFixturePath: string;
 
   beforeAll(async () => {
     dataSource = createTestDataSource(ALL_ENTITIES);
@@ -90,11 +97,11 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
       host: process.env.REDIS_HOST ?? 'redis',
       port: Number(process.env.REDIS_PORT ?? 6379),
     };
-    queue = new Queue<ProcessVideoJobPayload>(VIDEO_PROCESSING_QUEUE_NAME, {
+    queue = new Queue<ProcessVideoJobPayload>(TEST_QUEUE_NAME, {
       connection,
     });
     worker = new Worker<ProcessVideoJobPayload, VideoMetadata>(
-      VIDEO_PROCESSING_QUEUE_NAME,
+      TEST_QUEUE_NAME,
       (job) => processor.process(job),
       { connection },
     );
@@ -111,6 +118,9 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
       'yuv420p',
       fixturePath,
     ]);
+
+    corruptedFixturePath = join(fixtureDir, 'corrupted.mp4');
+    await writeFile(corruptedFixturePath, Buffer.from('not a real video file'));
   });
 
   afterAll(async () => {
@@ -126,7 +136,9 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
   });
 
   let userCounter = 0;
-  async function createDraftVideo(): Promise<Video> {
+  async function createDraftVideo(
+    sourceFilePath: string = fixturePath,
+  ): Promise<Video> {
     const user = await userRepository.save(
       userRepository.create({
         email: `video_processor_${++userCounter}@example.com`,
@@ -145,12 +157,12 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
         channel_id: channel.id,
         original_filename: 'sample.mp4',
         content_type: 'video/mp4',
-        size: String(statSync(fixturePath).size),
+        size: String(statSync(sourceFilePath).size),
       }),
     );
 
     const key = buildOriginalKey(video.id, video.original_filename);
-    await uploadFixture(storageService, key, fixturePath);
+    await uploadFixture(storageService, key, sourceFilePath);
 
     return video;
   }
@@ -162,7 +174,23 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
     });
   }
 
-  it('extracts duration/size/width/height and transitions status to processing', async () => {
+  function waitForFinalFailure(): Promise<Error> {
+    return new Promise((resolve) => {
+      const handler = (
+        job: Job<ProcessVideoJobPayload, VideoMetadata, string> | undefined,
+        err: Error,
+      ) => {
+        const maxAttempts = job?.opts.attempts ?? 1;
+        if ((job?.attemptsStarted ?? 0) >= maxAttempts) {
+          worker.off('failed', handler);
+          resolve(err);
+        }
+      };
+      worker.on('failed', handler);
+    });
+  }
+
+  it('completes the full pipeline: extracts metadata, generates a thumbnail and transitions status to ready', async () => {
     const video = await createDraftVideo();
 
     const outcome = waitForJobOutcome();
@@ -175,10 +203,21 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
     expect(metadata.size).toBe(statSync(fixturePath).size);
 
     const persisted = await videoRepository.findOneBy({ id: video.id });
-    expect(persisted!.status).toBe(VideoStatus.PROCESSING);
+    expect(persisted!.status).toBe(VideoStatus.READY);
+    expect(persisted!.duration).toBe(2);
+    expect(persisted!.width).toBe(320);
+    expect(persisted!.height).toBe(240);
+    expect(persisted!.size).toBe(String(statSync(fixturePath).size));
+
+    const downloadedThumbnailPath = join(fixtureDir, `${video.id}-check.jpg`);
+    await storageService.downloadObject(
+      buildThumbnailKey(video.id),
+      downloadedThumbnailPath,
+    );
+    expect(statSync(downloadedThumbnailPath).size).toBeGreaterThan(0);
   });
 
-  it('does not revert status to draft on a subsequent retry of the same video', async () => {
+  it('does not revert status to draft on a subsequent retry, and still completes to ready', async () => {
     const video = await createDraftVideo();
     video.status = VideoStatus.PROCESSING;
     await videoRepository.save(video);
@@ -188,6 +227,22 @@ describe('VideoProcessor (integration vs Redis + ffprobe real)', () => {
     await outcome;
 
     const persisted = await videoRepository.findOneBy({ id: video.id });
-    expect(persisted!.status).toBe(VideoStatus.PROCESSING);
+    expect(persisted!.status).toBe(VideoStatus.READY);
+  });
+
+  it('exhausts retries on a corrupted fixture and transitions status to error with the captured error message', async () => {
+    const video = await createDraftVideo(corruptedFixturePath);
+
+    const failure = waitForFinalFailure();
+    await queue.add(
+      PROCESS_VIDEO_JOB_NAME,
+      { videoId: video.id },
+      { attempts: 3, backoff: { type: 'exponential', delay: 200 } },
+    );
+    await failure;
+
+    const persisted = await videoRepository.findOneBy({ id: video.id });
+    expect(persisted!.status).toBe(VideoStatus.ERROR);
+    expect(persisted!.error_message).toBeTruthy();
   });
 });
