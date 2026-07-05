@@ -665,9 +665,9 @@ describe('Videos (e2e)', () => {
       expect(downloadUrl.pathname).toMatch(
         new RegExp(`/videos/${video.id}/original\\.mp4$`),
       );
-      expect(downloadUrl.searchParams.get('response-content-disposition')).toMatch(
-        /^attachment/,
-      );
+      expect(
+        downloadUrl.searchParams.get('response-content-disposition'),
+      ).toMatch(/^attachment/);
     });
   });
 });
