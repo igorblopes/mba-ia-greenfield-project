@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 7/10 completed
+**SIs:** 8/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
 - **Status:** completed
@@ -146,13 +146,22 @@
   - Ambiente: Docker Desktop não estava em execução nesta sessão — iniciado, e `docker compose up -d` recriou os containers antes da verificação.
 
 ### SI-03.8 — Endpoint de streaming com Range/206
-- **Status:** pending
-- **Objetivo:** Expor a URL pré-assinada de reprodução — o streaming com `Range`/`206` é resolvido inteiramente pelo protocolo `GetObject` do storage, sem parsing de `Range` no NestJS.
+- **Status:** completed
+- **Objetivo:** _(revisado em 2026-07-05 — override explícito de `phase-03-videos/TD-06`, decisão tomada pelo usuário ao acionar esta SI via `/implement`; ver addendum "Override" no TD)._ `GET /videos/:id/play` passa a atuar como proxy de streaming: repassa o header `Range` recebido ao `GetObjectCommand` do storage (leitura parcial, sem download completo, sem bufferizar o arquivo inteiro em memória) e monta a resposta HTTP manualmente (`200`/`206` + `Content-Range`/`Accept-Ranges`/`Content-Length`/`Content-Type`) a partir do que o S3/MinIO retornar. O plano original desta SI (Option A, TD-06) previa apenas devolver uma URL pré-assinada, sem qualquer parsing de `Range` no NestJS — comportamento que passa a valer só para o download (SI-03.9), não afetado por este override.
 - **Testes planejados:**
-  - `VideosService.getPlaybackUrl` — Unit: branch `VIDEO_NOT_READY`, geração de URL, storage mockado (`src/videos/videos.service.spec.ts`)
-  - `StorageService.presignGetObject` (inline) — Integration vs MinIO real: URL retornada aceita requisição `Range` e responde `206 Partial Content` (`src/videos/storage.service.integration-spec.ts`)
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+  - `VideosService.getPlaybackStream` — Unit: branch `VIDEO_NOT_FOUND`, branch `VIDEO_NOT_READY`, repasse do `range` ao storage mockado (`src/videos/videos.service.spec.ts`)
+  - `StorageService.getObject` — Integration vs MinIO real: leitura sem `Range` retorna o objeto completo; leitura com `Range: bytes=0-4` retorna `contentRange`/`contentLength` refletindo a leitura parcial (`src/videos/storage.service.integration-spec.ts`)
+  - `GET /videos/:id/play` — E2E: sem `Range` → `200` com corpo completo; com `Range` → `206` + `Content-Range`; vídeo não-`ready` → `409`; vídeo inexistente → `404` (`test/videos.e2e-spec.ts`)
+- **Resultado dos testes:**
+  - `docker compose exec nestjs-api npm test -- --runInBand src/videos/videos.service.spec.ts src/videos/storage.service.integration-spec.ts` + `docker compose exec nestjs-api npm run test:e2e -- videos.e2e-spec.ts` → 36/36 passing (3 novos casos unit de `getPlaybackStream`, 2 novos casos de integração de `getObject` contra MinIO real, 4 novos casos e2e de `GET /videos/:id/play`; demais são os já existentes destes arquivos, sem regressão).
+  - Regressão completa: `docker compose exec nestjs-api npx tsc --noEmit` → exit 0. `docker compose exec nestjs-api npm test -- --runInBand --testPathIgnorePatterns=migrations.integration-spec.ts` → 29 suites, 182/182 passing (`migrations.integration-spec.ts` excluído pelo mesmo bug pré-existente já documentado na SI-03.5, não relacionado a esta SI). `docker compose exec nestjs-api npm run test:e2e` → 4 suites, 67/67 passing (63 pré-existentes + 4 novos de `GET /videos/:id/play`).
+  - `docker compose exec nestjs-api npm run lint` nos 7 arquivos desta SI → 0 problemas em 6 deles (`domain.exception.ts`, `storage.service.ts`, `storage.service.integration-spec.ts`, `videos.controller.ts`, `videos.service.ts`, `test/videos.e2e-spec.ts`); `videos.service.spec.ts` reporta 27 erros `@typescript-eslint/unbound-method` já pré-existentes no arquivo inteiro (linhas do describe `createDraft`/`completeUpload`/`abortUpload`, não tocadas por esta SI) — mesmo padrão (`expect(mock.method)` sem bind) reproduzido pelos 3 novos testes desta SI para manter consistência com o arquivo, e confirmado presente também em `src/channels/channels.service.spec.ts` (arquivo não tocado por nenhuma SI desta fase), portanto débito de lint pré-existente e projeto-wide, fora do escopo desta SI. `npm run lint` no projeto inteiro reporta 217 problemas, majoritariamente em `test/auth.e2e-spec.ts` (não relacionado a esta branch).
+- **Notas de implementação:**
+  - **Override de decisão arquitetural (TD-06), explicitamente solicitado pelo usuário ao acionar `/implement` para esta SI:** o plano original (Option A) prescrevia `GET /videos/:id/play` retornando apenas `{ url, expires_in }` de uma URL pré-assinada, sem nenhum parsing de `Range` no NestJS — decisão documentada em `phase-03-videos/TD-06` com rationale explícito (anti-padrão de escala para vídeo, contradiz `Rel(frontend, storage, "Streams", "HTTPS")` do C4, bug conhecido `nestjs/nest#14873` de `StreamableFile` + Range no iOS). O usuário optou por seguir as instruções do comando (Option B, API como proxy) em vez do plano — documentado como um addendum "Override" em `TD-06`, e a seção "Streaming/Range behavior" + o contrato `GET /videos/:id/play` do plano foram atualizados para refletir a nova decisão, junto com o test spec `nestjs-project/specs/videos-play.plan.md` (que assumia a Option A original). O anti-padrão de escala citado no TD (todo byte reproduzido atravessa o processo Node.js) **não foi mitigado** — é um risco aceito conscientemente por esta decisão, não uma lacuna técnica.
+  - `StorageService.getObject(key, range?)` (novo método) repassa o parâmetro `Range` recebido diretamente ao `GetObjectCommand` do SDK (formato nativo `bytes=start-end`, sem parsing/validação própria) e devolve `stream`/`contentType`/`contentLength`/`contentRange`/`acceptRanges` exatamente como o S3/MinIO retornar — nenhuma lógica de cálculo de intervalo de bytes implementada no NestJS; toda a semântica de Range (incluindo casos de borda como `bytes=N-` aberto) é delegada ao protocolo `GetObject`, na mesma linha do já estabelecido `downloadObject` (stream, sem buffer completo em memória).
+  - `VideosController.play`: resposta montada manualmente via `@Res()` + `node:stream/promises.pipeline` (não `StreamableFile`), evitando deliberadamente o bug conhecido `nestjs/nest#14873`. Status `206` decidido pela presença de `contentRange` na resposta do storage (não pela mera presença do header `Range` na requisição) — reflete o que o storage efetivamente serviu, não a intenção do cliente.
+  - Download (`GET /videos/:id/download`, SI-03.9) não foi alterado por este override — permanece com a Option A original (URL pré-assinada), já que o override desta SI é escopado apenas ao streaming/play.
+  - **Fora de escopo, não corrigido:** débito de lint pré-existente `@typescript-eslint/unbound-method` no padrão `expect(mock.method)` usado extensivamente em arquivos `*.spec.ts`/`*.e2e-spec.ts` do projeto (confirmado em `videos.service.spec.ts` e `channels.service.spec.ts`, ambos não introduzidos por esta SI) — candidato a uma configuração dedicada do ESLint (override de `unbound-method` para arquivos de teste, padrão comum com `eslint-plugin-jest`) em uma tarefa própria, fora do escopo de SI-03.8.
 
 ### SI-03.9 — Endpoint de download
 - **Status:** pending

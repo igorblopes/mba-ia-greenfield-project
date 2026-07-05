@@ -249,6 +249,8 @@ _Subprojects in scope:_
 
 **Risks & Mitigation:** Expiração da URL pré-assinada durante reprodução longa — mitigar com TTL generoso (ex. 6h) suficiente para cobrir uma sessão de visualização típica; renovação fica a cargo do frontend em fase futura. Vazamento de URL pré-assinada permite acesso por terceiros até a expiração — aceitável neste estágio dado que vídeos publicados são, por natureza do produto, assistíveis por usuários anônimos (`docs/project-plan.md`: "Usuários anônimos podem assistir livremente").
 
+**Override (2026-07-05, implementação de SI-03.8):** decisão revertida para **Option B (API como proxy de streaming)** por instrução explícita do usuário ao acionar `/implement` para esta SI, contrariando a recomendação acima. `GET /videos/:id/play` passa a fazer parsing do header `Range`, ler parcialmente o objeto do storage (`GetObjectCommand` com parâmetro `Range` repassado) e retornar o stream diretamente via NestJS, com `206 Partial Content`/`Content-Range`/`Accept-Ranges`/`Content-Length` montados a partir da resposta do S3/MinIO. Os riscos documentados em Option B (todo byte reproduzido atravessa o processo da API; issue conhecido `nestjs/nest#14873` de `StreamableFile` + Range no iOS) permanecem válidos e não foram mitigados — o segundo é evitado por não usar `StreamableFile` (resposta montada manualmente via `@Res()` + `pipeline`), mas o anti-padrão de escala (bandwidth do Node.js no caminho de dados) é um risco aceito conscientemente por esta decisão, não resolvido tecnicamente. Download (`GET /videos/:id/download`, TD-03/SI-03.9) não é afetado por este override e continua via Option A (presigned URL).
+
 ---
 
 ## TD-07: Estratégia de URL Única por Vídeo

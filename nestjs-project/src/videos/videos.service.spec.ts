@@ -3,11 +3,13 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
 import { Repository } from 'typeorm';
+import { Readable } from 'node:stream';
 import {
   FileTooLargeException,
   VideoNotDraftException,
   VideoNotFoundException,
   VideoNotOwnedException,
+  VideoNotReadyException,
 } from '../common/exceptions/domain.exception';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { CreateVideoDto } from './dto/create-video.dto';
@@ -46,6 +48,7 @@ describe('VideosService (unit)', () => {
             presignUploadPart: jest.fn(),
             completeMultipartUpload: jest.fn(),
             abortMultipartUpload: jest.fn(),
+            getObject: jest.fn(),
           },
         },
         {
@@ -260,6 +263,51 @@ describe('VideosService (unit)', () => {
         'upload-123',
       );
       expect(videoRepository.remove).toHaveBeenCalledWith(video);
+    });
+  });
+
+  describe('getPlaybackStream', () => {
+    it('throws VideoNotFoundException when the video does not exist', async () => {
+      videoRepository.findOneBy.mockResolvedValue(null);
+
+      await expect(service.getPlaybackStream('video-1')).rejects.toThrow(
+        VideoNotFoundException,
+      );
+      expect(storageService.getObject).not.toHaveBeenCalled();
+    });
+
+    it('throws VideoNotReadyException when the video is not ready', async () => {
+      videoRepository.findOneBy.mockResolvedValue(
+        draftVideo({ status: VideoStatus.PROCESSING }),
+      );
+
+      await expect(service.getPlaybackStream('video-1')).rejects.toThrow(
+        VideoNotReadyException,
+      );
+      expect(storageService.getObject).not.toHaveBeenCalled();
+    });
+
+    it('resolves the storage key and forwards the Range header for a ready video', async () => {
+      videoRepository.findOneBy.mockResolvedValue(
+        draftVideo({ status: VideoStatus.READY, upload_id: null }),
+      );
+      const stream = Readable.from(Buffer.from('bytes'));
+      storageService.getObject.mockResolvedValue({
+        stream,
+        contentType: 'video/mp4',
+        contentLength: 5,
+        contentRange: 'bytes 0-4/5',
+        acceptRanges: 'bytes',
+      });
+
+      const result = await service.getPlaybackStream('video-1', 'bytes=0-4');
+
+      expect(storageService.getObject).toHaveBeenCalledWith(
+        'videos/video-1/original.mp4',
+        'bytes=0-4',
+      );
+      expect(result.stream).toBe(stream);
+      expect(result.contentRange).toBe('bytes 0-4/5');
     });
   });
 });
