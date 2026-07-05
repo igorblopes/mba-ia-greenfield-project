@@ -32,4 +32,13 @@ export default tseslint.config(
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
+  {
+    // Jest mock methods (`jest.fn()`) never rely on `this`, so extracting
+    // them for `expect(mock.method).toHaveBeenCalledWith(...)` is safe —
+    // this is a known false positive of the rule for Jest-based test files.
+    files: ['**/*.spec.ts', '**/*.integration-spec.ts', 'test/**/*.e2e-spec.ts'],
+    rules: {
+      '@typescript-eslint/unbound-method': 'off',
+    },
+  },
 );
