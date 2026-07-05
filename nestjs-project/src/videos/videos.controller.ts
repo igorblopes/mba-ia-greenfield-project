@@ -1,13 +1,16 @@
+import { pipeline } from 'node:stream/promises';
 import {
   Body,
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   Param,
   ParseIntPipe,
   ParseUUIDPipe,
   Post,
+  Res,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -16,8 +19,10 @@ import {
   ApiTags,
   getSchemaPath,
 } from '@nestjs/swagger';
+import type { Response } from 'express';
 import type { JwtPayload } from '../auth/auth.types';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { ChannelsService } from '../channels/channels.service';
 import { ApiErrorEnvelope } from '../common/openapi/api-error-envelope.dto';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
@@ -187,5 +192,52 @@ export class VideosController {
   ): Promise<void> {
     const channel = await this.channelsService.findByUserId(user.sub);
     await this.videosService.abortUpload(channel.id, id);
+  }
+
+  @Get(':id/play')
+  @Public()
+  @ApiOperation({
+    summary: 'Stream a ready video',
+    description:
+      'Streams the video bytes for a ready video, proxying HTTP Range requests to storage for partial reads (206 Partial Content).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Full video stream (no Range header sent)',
+  })
+  @ApiResponse({
+    status: 206,
+    description: 'Partial video stream honoring the Range header',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Video not found',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Video is not ready for playback',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  async play(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Headers('range') range: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const result = await this.videosService.getPlaybackStream(id, range);
+
+    res.status(result.contentRange ? 206 : 200);
+    res.set('Accept-Ranges', result.acceptRanges ?? 'bytes');
+    if (result.contentType) {
+      res.set('Content-Type', result.contentType);
+    }
+    if (result.contentLength !== undefined) {
+      res.set('Content-Length', String(result.contentLength));
+    }
+    if (result.contentRange) {
+      res.set('Content-Range', result.contentRange);
+    }
+
+    await pipeline(result.stream, res);
   }
 }

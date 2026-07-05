@@ -124,6 +124,50 @@ describe('StorageService (integration vs MinIO real)', () => {
     });
   });
 
+  describe('getObject', () => {
+    let key: string;
+    const body = Buffer.from('0123456789abcdefghij');
+
+    beforeAll(async () => {
+      key = `videos/test-${randomUUID()}/original.mp4`;
+      const uploadId = await storageService.createMultipartUpload(
+        key,
+        'video/mp4',
+      );
+      const partUrl = await storageService.presignUploadPart(key, uploadId, 1);
+      const etag = await uploadPart(partUrl, body);
+      await storageService.completeMultipartUpload(key, uploadId, [
+        { ETag: etag, PartNumber: 1 },
+      ]);
+    });
+
+    async function readAll(stream: NodeJS.ReadableStream): Promise<Buffer> {
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk as Buffer);
+      }
+      return Buffer.concat(chunks);
+    }
+
+    it('returns the full object body when no Range is given', async () => {
+      const result = await storageService.getObject(key);
+
+      expect(result.contentLength).toBe(body.length);
+      expect(result.contentRange).toBeUndefined();
+      const downloaded = await readAll(result.stream);
+      expect(downloaded.equals(body)).toBe(true);
+    });
+
+    it('reads only the requested byte range from storage', async () => {
+      const result = await storageService.getObject(key, 'bytes=0-4');
+
+      expect(result.contentLength).toBe(5);
+      expect(result.contentRange).toBe(`bytes 0-4/${body.length}`);
+      const downloaded = await readAll(result.stream);
+      expect(downloaded.equals(body.subarray(0, 5))).toBe(true);
+    });
+  });
+
   describe('bucket auto-creation on boot', () => {
     it('creates the configured bucket automatically when it does not exist yet', async () => {
       const bucket = `streamtube-test-${randomUUID()}`;

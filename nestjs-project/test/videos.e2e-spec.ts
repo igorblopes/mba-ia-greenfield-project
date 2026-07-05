@@ -1,16 +1,21 @@
+import { rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { getQueueToken } from '@nestjs/bullmq';
 import { Test } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
 import request from 'supertest';
 import { App } from 'supertest/types';
-import { DataSource } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { ThrottlerStorage, ThrottlerStorageService } from '@nestjs/throttler';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
 import { DomainExceptionFilter } from '../src/common/filters/domain-exception.filter';
 import { ValidationExceptionFilter } from '../src/common/filters/validation-exception.filter';
 import { cleanAllTables } from '../src/test/create-test-data-source';
+import { Video, VideoStatus } from '../src/videos/entities/video.entity';
 import { StorageService } from '../src/videos/storage.service';
 import type { ProcessVideoJobPayload } from '../src/videos/videos.service';
 import {
@@ -464,6 +469,98 @@ describe('Videos (e2e)', () => {
         [draftBody.id],
       );
       expect(rows).toHaveLength(1);
+    });
+  });
+
+  describe('GET /videos/:id/play', () => {
+    let videoRepository: Repository<Video>;
+    let storageService: StorageService;
+    let channelId: string;
+    let playOwnerCounter = 0;
+
+    beforeEach(async () => {
+      videoRepository = app.get(getRepositoryToken(Video));
+      storageService = app.get(StorageService);
+      const ownerToken = await registerConfirmAndLogin(
+        `play-owner-${++playOwnerCounter}@example.com`,
+      );
+      channelId = await channelIdFor(ownerToken);
+    });
+
+    const testBody = Buffer.from('0123456789abcdefghij');
+
+    async function createVideo(
+      status: VideoStatus,
+      body?: Buffer,
+    ): Promise<Video> {
+      const video = await videoRepository.save(
+        videoRepository.create({
+          channel_id: channelId,
+          original_filename: 'movie.mp4',
+          content_type: 'video/mp4',
+          size: String(body?.length ?? 0),
+          status,
+        }),
+      );
+
+      if (body) {
+        const key = `videos/${video.id}/original.mp4`;
+        const tmpPath = join(tmpdir(), `${video.id}-play-e2e.mp4`);
+        await writeFile(tmpPath, body);
+        await storageService.uploadObject(key, tmpPath, 'video/mp4');
+        await rm(tmpPath, { force: true });
+      }
+
+      return video;
+    }
+
+    // 1.1 play-video-ready-sem-range-retorna-200-completo
+    it('streams the full video body with 200 when no Range header is sent', async () => {
+      const video = await createVideo(VideoStatus.READY, testBody);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${video.id}/play`)
+        .expect(200);
+
+      expect(res.headers['content-length']).toBe(String(testBody.length));
+      expect(res.headers['accept-ranges']).toBe('bytes');
+      expect((res.body as Buffer).equals(testBody)).toBe(true);
+    });
+
+    // 1.2 play-com-range-responde-206-com-leitura-parcial
+    it('returns 206 Partial Content with Content-Range for a Range request', async () => {
+      const video = await createVideo(VideoStatus.READY, testBody);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${video.id}/play`)
+        .set('Range', 'bytes=0-9')
+        .expect(206);
+
+      expect(res.headers['content-range']).toBe(`bytes 0-9/${testBody.length}`);
+      expect(res.headers['content-length']).toBe('10');
+      expect((res.body as Buffer).equals(testBody.subarray(0, 10))).toBe(true);
+    });
+
+    // 1.3 play-video-nao-ready-retorna-409
+    it('returns 409 VIDEO_NOT_READY when the video is not ready', async () => {
+      const video = await createVideo(VideoStatus.DRAFT);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${video.id}/play`)
+        .expect(409);
+      const body = res.body as ErrorResponseBody;
+
+      expect(body.error).toBe('VIDEO_NOT_READY');
+    });
+
+    // 1.4 play-video-inexistente-retorna-404
+    it('returns 404 VIDEO_NOT_FOUND for a non-existent video id', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/videos/00000000-0000-0000-0000-000000000000/play')
+        .expect(404);
+      const body = res.body as ErrorResponseBody;
+
+      expect(body.error).toBe('VIDEO_NOT_FOUND');
     });
   });
 });

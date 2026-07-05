@@ -34,6 +34,14 @@ export interface PresignGetObjectOptions {
   responseContentDisposition?: string;
 }
 
+export interface GetObjectResult {
+  stream: Readable;
+  contentType?: string;
+  contentLength?: number;
+  contentRange?: string;
+  acceptRanges?: string;
+}
+
 @Injectable()
 export class StorageService implements OnModuleInit {
   private readonly logger = new Logger(StorageService.name);
@@ -133,6 +141,23 @@ export class StorageService implements OnModuleInit {
     return getSignedUrl(this.s3, command, {
       expiresIn: PRESIGNED_GET_EXPIRES_IN_SECONDS,
     });
+  }
+
+  async getObject(key: string, range?: string): Promise<GetObjectResult> {
+    const { Body, ContentType, ContentLength, ContentRange, AcceptRanges } =
+      await this.s3.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: range }),
+      );
+    if (!Body) {
+      throw new Error(`GetObject did not return a body for key "${key}"`);
+    }
+    return {
+      stream: Body as Readable,
+      contentType: ContentType,
+      contentLength: ContentLength,
+      contentRange: ContentRange,
+      acceptRanges: AcceptRanges,
+    };
   }
 
   async uploadObject(

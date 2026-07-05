@@ -8,11 +8,12 @@ import {
   VideoNotDraftException,
   VideoNotFoundException,
   VideoNotOwnedException,
+  VideoNotReadyException,
 } from '../common/exceptions/domain.exception';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { CreateVideoDto } from './dto/create-video.dto';
 import { Video, VideoStatus } from './entities/video.entity';
-import { StorageService } from './storage.service';
+import { StorageService, type GetObjectResult } from './storage.service';
 import { PRESIGNED_PUT_EXPIRES_IN_SECONDS } from './storage.constants';
 import { buildOriginalKey } from './video-storage-key.util';
 import {
@@ -145,6 +146,22 @@ export class VideosService {
     await this.storageService.abortMultipartUpload(key, video.upload_id!);
 
     await this.videoRepository.remove(video);
+  }
+
+  async getPlaybackStream(
+    videoId: string,
+    range?: string,
+  ): Promise<GetObjectResult> {
+    const video = await this.videoRepository.findOneBy({ id: videoId });
+    if (!video) {
+      throw new VideoNotFoundException();
+    }
+    if (video.status !== VideoStatus.READY) {
+      throw new VideoNotReadyException();
+    }
+
+    const key = buildOriginalKey(video.id, video.original_filename);
+    return this.storageService.getObject(key, range);
   }
 
   private async findOwnedDraft(

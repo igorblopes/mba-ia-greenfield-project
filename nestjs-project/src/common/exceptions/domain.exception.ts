@@ -76,3 +76,9 @@ export class VideoNotDraftException extends DomainException {
     super('VIDEO_NOT_DRAFT', 409, 'Video is not in draft status');
   }
 }
+
+export class VideoNotReadyException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_READY', 409, 'Video is not ready for playback');
+  }
+}

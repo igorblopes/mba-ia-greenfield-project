@@ -239,27 +239,29 @@ Implementar o pipeline completo de upload e processamento de vídeos da StreamTu
 **Test Specs:** see `nestjs-project/specs/videos-play.plan.md`
 **Authorization:** Public (`@Public()`) — vídeo `ready` assistível por anônimos (`phase-03-videos/TD-06`)
 
-**Description:** Expõe a URL pré-assinada de reprodução — o streaming com `Range`/`206` é resolvido inteiramente pelo protocolo `GetObject` do storage, sem parsing de `Range` no NestJS.
+**Description:** _(revisado em 2026-07-05 — override de `phase-03-videos/TD-06`, ver addendum "Override" no TD)._ Endpoint faz proxy de streaming: repassa o header `Range` recebido ao `GetObjectCommand` do storage (leitura parcial, sem carregar o arquivo inteiro em memória), e monta a resposta HTTP manualmente com `206 Partial Content`/`Content-Range`/`Accept-Ranges`/`Content-Length`/`Content-Type` a partir do que o S3/MinIO retornar.
 
 **Technical actions:**
 
 1. Adicionar `VideoNotReadyException` (409) a `src/common/exceptions/domain.exception.ts`
-2. Estender `VideosService` com `getPlaybackUrl(videoId)` — valida `status: 'ready'` (senão `VideoNotReadyException`), chama `storageService.presignGetObject(key)` sem `ResponseContentDisposition`, TTL ~21600s/6h (`phase-03-videos/TD-06`)
-3. Adicionar `GET /videos/:id/play` a `VideosController` — `@Public()`, retorna `{ url, expires_in }`, documentado via `@nestjs/swagger`
+2. Estender `StorageService` com `getObject(key, range?)` — `GetObjectCommand` repassando o parâmetro `Range` (formato `bytes=start-end`) recebido do cliente; retorna `{ stream, contentType, contentLength, contentRange, acceptRanges }` a partir da resposta do S3/MinIO, sem bufferizar o corpo
+3. Estender `VideosService` com `getPlaybackStream(videoId, range?)` — valida `status: 'ready'` (senão `VideoNotReadyException`), resolve a storage key e delega a `storageService.getObject(key, range)`
+4. Adicionar `GET /videos/:id/play` a `VideosController` — `@Public()`, lê o header `Range` da requisição, define status `206` (quando `contentRange` presente) ou `200`, define `Content-Type`/`Accept-Ranges`/`Content-Length`/`Content-Range` e faz `pipeline` do stream retornado direto para a resposta (`@Res()`, sem `StreamableFile` — evita o bug conhecido `nestjs/nest#14873` de Range + iOS), documentado via `@nestjs/swagger`
 
 **Tests:**
 
 | Artifact | Layer | Test file |
 |----------|-------|-----------|
-| `VideosService.getPlaybackUrl` | Unit: branch `VIDEO_NOT_READY`, geração de URL (storage mockado) | `src/videos/videos.service.spec.ts` |
-| `StorageService.presignGetObject` (inline) | Integration vs MinIO real: URL retornada aceita requisição `Range` e responde `206 Partial Content` | `src/videos/storage.service.integration-spec.ts` |
+| `VideosService.getPlaybackStream` | Unit: branch `VIDEO_NOT_READY`, branch `VIDEO_NOT_FOUND`, repasse do `range` ao storage (storage mockado) | `src/videos/videos.service.spec.ts` |
+| `StorageService.getObject` | Integration vs MinIO real: leitura sem `Range` retorna o objeto completo; leitura com `Range: bytes=0-N` retorna `contentRange`/`contentLength` refletindo a leitura parcial | `src/videos/storage.service.integration-spec.ts` |
+| `GET /videos/:id/play` | E2E: sem `Range` → `200` com corpo completo; com `Range` → `206` + `Content-Range`; vídeo não-`ready` → `409`; vídeo inexistente → `404` | `test/videos.e2e-spec.ts` |
 
 **Dependencies:** SI-03.3, SI-03.7
 
 **Acceptance criteria:**
 
-- `GET /videos/:id/play` sem autenticação, para um vídeo com `status: 'ready'`, retorna `200` com uma URL pré-assinada de streaming
-- A URL retornada aceita requisições `Range` e responde `206 Partial Content` diretamente do MinIO/S3, sem qualquer parsing de `Range` no NestJS
+- `GET /videos/:id/play` sem autenticação, para um vídeo com `status: 'ready'` e sem header `Range`, retorna `200` com o corpo completo do vídeo e headers `Content-Type`/`Content-Length`/`Accept-Ranges: bytes`
+- `GET /videos/:id/play` com header `Range` retorna `206 Partial Content` com `Content-Range` refletindo o intervalo servido, lendo apenas a porção solicitada do storage (sem download completo, sem bufferizar o arquivo inteiro em memória)
 - `GET /videos/:id/play` para um vídeo que não está `'ready'` retorna `409` com `errorCode: 'VIDEO_NOT_READY'`
 - `GET /videos/:id/play` com `id` inexistente retorna `404` com `errorCode: 'VIDEO_NOT_FOUND'`
 
@@ -428,9 +430,13 @@ Implementar o pipeline completo de upload e processamento de vídeos da StreamTu
 
 #### GET /videos/:id/play (SI-03.8)
 
-**Response 200:**
-- url: string (presigned S3 `GET` URL, inline, no `ResponseContentDisposition` — `phase-03-videos/TD-06`)
-- expires_in: number (seconds, ~21600 / 6h)
+_(revisado em 2026-07-05 — override de `phase-03-videos/TD-06`, ver addendum "Override" no TD)._
+
+**Response 200 (no `Range` header):** full video body, streamed from storage.
+- Headers: `Content-Type`, `Content-Length`, `Accept-Ranges: bytes`
+
+**Response 206 (with `Range` header):** partial video body, read directly from storage (no full download).
+- Headers: `Content-Type`, `Content-Length` (partial), `Content-Range`, `Accept-Ranges: bytes`
 
 **Error responses:**
 - 404 VIDEO_NOT_FOUND: when `id` does not match an existing video
@@ -552,11 +558,14 @@ Coluna única `status` (enum nativo PostgreSQL), sem histórico de auditoria —
 
 ### Streaming/Range behavior
 
-O cliente nunca faz streaming através do processo NestJS — a API só retorna uma URL pré-assinada (`GET /videos/:id/play`, `phase-03-videos/TD-06`); o cliente (player/browser) faz as requisições `Range` diretamente contra o MinIO/S3, que implementa `Range`/`206 Partial Content` nativamente via o protocolo `GetObject` (`phase-03-videos/TD-06`).
+_(revisado em 2026-07-05 — override de `phase-03-videos/TD-06`, ver addendum "Override" no TD; o texto original desta seção descrevia a Option A original, hoje válida apenas para o download, SI-03.9)._
 
-- Nenhum parsing de `Range`/`Content-Range` no NestJS.
-- TTL da URL pré-assinada: ~21600s (6h) — cobre uma sessão típica de reprodução; renovação fica a cargo do frontend em fase futura.
-- Mesmo mecanismo se aplica ao download (`GET /videos/:id/download`) — mesma chave/endpoint, diferindo apenas pelo parâmetro `ResponseContentDisposition: attachment` (`phase-03-videos/TD-03`).
+`GET /videos/:id/play` atua como proxy de streaming: o cliente (player/browser) envia a requisição `Range` diretamente ao NestJS, que repassa o valor recebido ao `GetObjectCommand` do storage (leitura parcial do objeto, sem baixar o arquivo inteiro) e monta a resposta HTTP a partir do que o S3/MinIO retornar.
+
+- Sem header `Range`: `200`, corpo completo, `Content-Length` = tamanho total, `Accept-Ranges: bytes`.
+- Com header `Range` (`bytes=start-end`): `206 Partial Content`, `Content-Range` refletindo o intervalo efetivamente servido pelo storage, `Content-Length` = tamanho da porção parcial.
+- Resposta montada manualmente (`@Res()` + `node:stream/promises.pipeline`), não via `StreamableFile` — evita o bug conhecido `nestjs/nest#14873` (Range + `StreamableFile` no iOS).
+- Download (`GET /videos/:id/download`, SI-03.9) **não** é afetado por este override — continua usando a URL pré-assinada direta ao storage (Option A original), mesma chave/endpoint, diferindo apenas pelo parâmetro `ResponseContentDisposition: attachment` (`phase-03-videos/TD-03`).
 - Pré-condição: vídeo com `status: 'ready'` — caso contrário, 409 `VIDEO_NOT_READY`.
 
 ---
