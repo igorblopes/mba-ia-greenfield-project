@@ -16,6 +16,7 @@ import { CreateVideoDto } from './dto/create-video.dto';
 import { Video, VideoStatus } from './entities/video.entity';
 import { StorageService } from './storage.service';
 import { VideosService } from './videos.service';
+import { PRESIGNED_GET_EXPIRES_IN_SECONDS } from './storage.constants';
 import {
   MAX_VIDEO_SIZE_BYTES,
   PROCESS_VIDEO_JOB_NAME,
@@ -49,6 +50,7 @@ describe('VideosService (unit)', () => {
             completeMultipartUpload: jest.fn(),
             abortMultipartUpload: jest.fn(),
             getObject: jest.fn(),
+            presignGetObject: jest.fn(),
           },
         },
         {
@@ -308,6 +310,52 @@ describe('VideosService (unit)', () => {
       );
       expect(result.stream).toBe(stream);
       expect(result.contentRange).toBe('bytes 0-4/5');
+    });
+  });
+
+  describe('getDownloadUrl', () => {
+    it('throws VideoNotFoundException when the video does not exist', async () => {
+      videoRepository.findOneBy.mockResolvedValue(null);
+
+      await expect(service.getDownloadUrl('video-1')).rejects.toThrow(
+        VideoNotFoundException,
+      );
+      expect(storageService.presignGetObject).not.toHaveBeenCalled();
+    });
+
+    it('throws VideoNotReadyException when the video is not ready', async () => {
+      videoRepository.findOneBy.mockResolvedValue(
+        draftVideo({ status: VideoStatus.PROCESSING }),
+      );
+
+      await expect(service.getDownloadUrl('video-1')).rejects.toThrow(
+        VideoNotReadyException,
+      );
+      expect(storageService.presignGetObject).not.toHaveBeenCalled();
+    });
+
+    it('presigns the original key forcing an attachment disposition for a ready video', async () => {
+      videoRepository.findOneBy.mockResolvedValue(
+        draftVideo({
+          status: VideoStatus.READY,
+          upload_id: null,
+          original_filename: 'movie.mp4',
+        }),
+      );
+      storageService.presignGetObject.mockResolvedValue(
+        'https://storage.example/videos/video-1/original.mp4?signed',
+      );
+
+      const result = await service.getDownloadUrl('video-1');
+
+      expect(storageService.presignGetObject).toHaveBeenCalledWith(
+        'videos/video-1/original.mp4',
+        { responseContentDisposition: 'attachment; filename="movie.mp4"' },
+      );
+      expect(result).toEqual({
+        url: 'https://storage.example/videos/video-1/original.mp4?signed',
+        expires_in: PRESIGNED_GET_EXPIRES_IN_SECONDS,
+      });
     });
   });
 });

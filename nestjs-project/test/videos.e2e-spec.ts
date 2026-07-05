@@ -58,6 +58,11 @@ interface CompleteUploadResponseBody {
   status: string;
 }
 
+interface DownloadResponseBody {
+  url: string;
+  expires_in: number;
+}
+
 interface MeResponseBody {
   sub: string;
 }
@@ -561,6 +566,108 @@ describe('Videos (e2e)', () => {
       const body = res.body as ErrorResponseBody;
 
       expect(body.error).toBe('VIDEO_NOT_FOUND');
+    });
+  });
+
+  describe('GET /videos/:id/download', () => {
+    let videoRepository: Repository<Video>;
+    let storageService: StorageService;
+    let channelId: string;
+    let downloadOwnerCounter = 0;
+
+    beforeEach(async () => {
+      videoRepository = app.get(getRepositoryToken(Video));
+      storageService = app.get(StorageService);
+      const ownerToken = await registerConfirmAndLogin(
+        `download-owner-${++downloadOwnerCounter}@example.com`,
+      );
+      channelId = await channelIdFor(ownerToken);
+    });
+
+    const testBody = Buffer.from('0123456789abcdefghij');
+
+    async function createVideo(
+      status: VideoStatus,
+      body?: Buffer,
+    ): Promise<Video> {
+      const video = await videoRepository.save(
+        videoRepository.create({
+          channel_id: channelId,
+          original_filename: 'movie.mp4',
+          content_type: 'video/mp4',
+          size: String(body?.length ?? 0),
+          status,
+        }),
+      );
+
+      if (body) {
+        const key = `videos/${video.id}/original.mp4`;
+        const tmpPath = join(tmpdir(), `${video.id}-download-e2e.mp4`);
+        await writeFile(tmpPath, body);
+        await storageService.uploadObject(key, tmpPath, 'video/mp4');
+        await rm(tmpPath, { force: true });
+      }
+
+      return video;
+    }
+
+    // 1.1 download-video-ready-retorna-url-com-attachment
+    it('returns a presigned download URL with an attachment disposition for a ready video', async () => {
+      const video = await createVideo(VideoStatus.READY, testBody);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${video.id}/download`)
+        .expect(200);
+      const body = res.body as DownloadResponseBody;
+
+      expect(typeof body.url).toBe('string');
+      expect(body.url.length).toBeGreaterThan(0);
+      expect(typeof body.expires_in).toBe('number');
+
+      const disposition = new URL(body.url).searchParams.get(
+        'response-content-disposition',
+      );
+      expect(disposition).toMatch(/^attachment/);
+    });
+
+    // 1.2 download-video-nao-ready-retorna-409
+    it('returns 409 VIDEO_NOT_READY when the video is not ready', async () => {
+      const video = await createVideo(VideoStatus.DRAFT);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${video.id}/download`)
+        .expect(409);
+      const body = res.body as ErrorResponseBody;
+
+      expect(body.error).toBe('VIDEO_NOT_READY');
+    });
+
+    // 1.3 download-e-play-referenciam-mesma-chave-storage
+    // Adapted: since the SI-03.8 override made /play a streaming proxy (it
+    // returns the video bytes, not a presigned URL), there is no play URL to
+    // compare against. AC #3's intent — download references the same storage
+    // key the streaming endpoint serves, differing only by disposition — is
+    // verified by asserting the download URL resolves to the shared original
+    // key and only download carries the attachment parameter.
+    it('references the same storage key served by streaming, differing only by disposition', async () => {
+      const video = await createVideo(VideoStatus.READY, testBody);
+
+      await request(app.getHttpServer())
+        .get(`/videos/${video.id}/play`)
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${video.id}/download`)
+        .expect(200);
+      const body = res.body as DownloadResponseBody;
+
+      const downloadUrl = new URL(body.url);
+      expect(downloadUrl.pathname).toMatch(
+        new RegExp(`/videos/${video.id}/original\\.mp4$`),
+      );
+      expect(downloadUrl.searchParams.get('response-content-disposition')).toMatch(
+        /^attachment/,
+      );
     });
   });
 });

@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 8/10 completed
+**SIs:** 9/10 completed
 
 ### SI-03.1 — Infraestrutura Docker: MinIO, Redis e worker
 - **Status:** completed
@@ -164,13 +164,22 @@
   - **Fora de escopo, não corrigido:** débito de lint pré-existente `@typescript-eslint/unbound-method` no padrão `expect(mock.method)` usado extensivamente em arquivos `*.spec.ts`/`*.e2e-spec.ts` do projeto (confirmado em `videos.service.spec.ts` e `channels.service.spec.ts`, ambos não introduzidos por esta SI) — candidato a uma configuração dedicada do ESLint (override de `unbound-method` para arquivos de teste, padrão comum com `eslint-plugin-jest`) em uma tarefa própria, fora do escopo de SI-03.8.
 
 ### SI-03.9 — Endpoint de download
-- **Status:** pending
+- **Status:** completed
 - **Objetivo:** Expor a URL pré-assinada de download — mesma chave e endpoint do streaming, forçando `ResponseContentDisposition: attachment`.
 - **Testes planejados:**
   - `VideosService.getDownloadUrl` — Unit: branch `VIDEO_NOT_READY`, parâmetro `ResponseContentDisposition` (`src/videos/videos.service.spec.ts`)
   - `StorageService.presignGetObject` (attachment) — Integration vs MinIO real: URL retornada serve o objeto com `Content-Disposition: attachment` (`src/videos/storage.service.integration-spec.ts`)
-- **Resultado dos testes:** _(a preencher)_
-- **Notas de implementação:** _(a preencher)_
+- **Resultado dos testes:**
+  - `docker compose exec nestjs-api npm test -- --runInBand src/videos/videos.service.spec.ts src/videos/storage.service.integration-spec.ts` → 2 suites, 24/24 passing (inclui os 3 novos casos unit de `getDownloadUrl`: `VIDEO_NOT_FOUND`, `VIDEO_NOT_READY`, e o caminho feliz assertando a `key` original + `responseContentDisposition: 'attachment; filename="movie.mp4"'` e o `expires_in`; o caso de integração de attachment de `presignGetObject` já existia desde a SI-03.3 e permanece verde).
+  - `docker compose exec nestjs-api npm run test:e2e -- --runInBand test/videos.e2e-spec.ts` → 1 suite, 18/18 passing (15 pré-existentes + 3 novos de `GET /videos/:id/download`: 200 com URL de attachment para vídeo `ready`; 409 `VIDEO_NOT_READY` para vídeo não-`ready`; download referencia a mesma chave de storage servida pelo streaming, só diferindo na disposição).
+  - Tests passaram na primeira execução — sem fix loop. `WARN` não-fatal do `StorageService` (quirk de lifecycle XML do MinIO já documentado na SI-03.3) apareceu na suíte de integração, sem afetar nenhum teste.
+- **Notas de implementação:**
+  - `VideosService.getDownloadUrl(videoId)` valida `status: 'ready'` (senão `VideoNotReadyException` → 409 `VIDEO_NOT_READY`, mesmo mapeamento já usado por `getPlaybackStream`) e `VideoNotFoundException` para `:id` inexistente; monta a chave via o `buildOriginalKey` compartilhado (mesma chave `videos/{id}/original.<ext>` que o streaming lê) e retorna `{ url, expires_in: PRESIGNED_GET_EXPIRES_IN_SECONDS }` (21600s / 6h, conforme contrato e TD-06).
+  - **Reconciliação plano × API existente:** a Technical action #1 do plano escreve `presignGetObject(key, { attachment: true, filename: original_filename })`, mas a assinatura real de `presignGetObject` foi fixada na SI-03.3 como `(key, { responseContentDisposition?: string })` — um passthrough fino para o S3. Optei por manter a assinatura existente e construir a string de disposição (`attachment; filename="..."`) no `VideosService` (Option A), em vez de estender o `StorageService` com uma forma de alto nível `{ attachment, filename }`. Isso: (a) não altera a API do storage (respeita "storage service existente" e evita superfície redundante — `presignGetObject` continua sem outros consumidores além deste); (b) mantém o `StorageService` como thin passthrough; (c) não quebra o teste de integração de attachment já existente da SI-03.3, que chama `presignGetObject(key, { responseContentDisposition: 'attachment; filename="video.mp4"' })`. O snippet do plano é ilustrativo e precede a decisão de API concreta da SI-03.3.
+  - **Linha de teste de integração já pré-satisfeita:** a tabela de Testes da SI-03.9 lista `StorageService.presignGetObject (attachment) — Integration vs MinIO real`, mas esse exato teste já existia em `src/videos/storage.service.integration-spec.ts` desde a SI-03.3 (`retorna uma URL que serve o objeto como attachment quando solicitado`, com fetch real ao MinIO verificando `content-disposition: attachment`). Não foi adicionado duplicata — a linha do plano é coberta pelo teste pré-existente, que roda como parte da suíte desta SI e permanece verde.
+  - **E2E cenário 1.3 adaptado (staleness do test spec por override anterior):** o test spec `nestjs-project/specs/videos-download.plan.md` (datado 2026-07-04) assume, no cenário 1.3, que `GET /videos/:id/play` também devolve uma URL pré-assinada (Option A original), para comparar "as duas URLs retornadas". Porém o override da SI-03.8 (2026-07-05) transformou o `play` em proxy de streaming — ele devolve os bytes do vídeo (200), não uma URL. Como não há URL de play para comparar, implementei o cenário 1.3 verificando a **intenção da AC #3** (download referencia a mesma chave de storage do streaming, diferindo só na disposição): o teste chama `play` (200, streaming) e `download` (200, JSON), e asserta que o `pathname` da URL de download termina em `/videos/{id}/original.mp4` (a chave compartilhada que o streaming serve) e que só o download carrega `response-content-disposition=attachment`. Comentário explicando a adaptação foi deixado no próprio teste. O test spec em si não foi reescrito (edição de spec fica fora do escopo de `/implement`).
+  - **Observação (não corrigida, fora do escopo):** a string de `Content-Disposition` usa `filename="${original_filename}"` cru; um `original_filename` contendo aspa dupla ou caractere não-ASCII poderia quebrar/degradar o header (RFC 6266 recomenda `filename*=UTF-8''<pct-encoded>` para esses casos). O plano pede apenas repassar o `filename`, então mantive simples; endurecer o encoding do nome de arquivo é candidato a uma tarefa própria.
+  - `GET /videos/:id/download` no `VideosController` é `@Public()` (sem `@ApiBearerAuth`, conforme Authorization Matrix e regra de controllers), documentado com `@ApiOperation` + `@ApiResponse` para 200/404/409 (erros referenciando o `ApiErrorEnvelope` compartilhado). Controller mantido thin — só delega para `videosService.getDownloadUrl(id)`; sem testes unitários de controller (E2E-only, conforme testing-guide). O endpoint de streaming (`play`) não foi tocado.
 
 ### SI-03.10 — Testes, documentação e fechamento
 - **Status:** pending

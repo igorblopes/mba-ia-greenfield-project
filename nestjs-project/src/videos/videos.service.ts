@@ -14,7 +14,10 @@ import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { CreateVideoDto } from './dto/create-video.dto';
 import { Video, VideoStatus } from './entities/video.entity';
 import { StorageService, type GetObjectResult } from './storage.service';
-import { PRESIGNED_PUT_EXPIRES_IN_SECONDS } from './storage.constants';
+import {
+  PRESIGNED_GET_EXPIRES_IN_SECONDS,
+  PRESIGNED_PUT_EXPIRES_IN_SECONDS,
+} from './storage.constants';
 import { buildOriginalKey } from './video-storage-key.util';
 import {
   MAX_VIDEO_SIZE_BYTES,
@@ -41,6 +44,11 @@ export interface CompleteUploadResult {
 
 export interface ProcessVideoJobPayload {
   videoId: string;
+}
+
+export interface DownloadUrlResult {
+  url: string;
+  expires_in: number;
 }
 
 @Injectable()
@@ -162,6 +170,26 @@ export class VideosService {
 
     const key = buildOriginalKey(video.id, video.original_filename);
     return this.storageService.getObject(key, range);
+  }
+
+  async getDownloadUrl(videoId: string): Promise<DownloadUrlResult> {
+    const video = await this.videoRepository.findOneBy({ id: videoId });
+    if (!video) {
+      throw new VideoNotFoundException();
+    }
+    if (video.status !== VideoStatus.READY) {
+      throw new VideoNotReadyException();
+    }
+
+    // Same storage key the streaming endpoint serves — only the presigned
+    // GET differs, forcing an attachment disposition so the client downloads
+    // the file instead of playing it inline.
+    const key = buildOriginalKey(video.id, video.original_filename);
+    const url = await this.storageService.presignGetObject(key, {
+      responseContentDisposition: `attachment; filename="${video.original_filename}"`,
+    });
+
+    return { url, expires_in: PRESIGNED_GET_EXPIRES_IN_SECONDS };
   }
 
   private async findOwnedDraft(

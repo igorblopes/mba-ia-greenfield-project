@@ -30,6 +30,7 @@ import { CreateVideoDto } from './dto/create-video.dto';
 import {
   type CompleteUploadResult,
   type CreateDraftResult,
+  type DownloadUrlResult,
   type UploadPartUrlResult,
   VideosService,
 } from './videos.service';
@@ -239,5 +240,38 @@ export class VideosController {
     }
 
     await pipeline(result.stream, res);
+  }
+
+  @Get(':id/download')
+  @Public()
+  @ApiOperation({
+    summary: 'Get a video download URL',
+    description:
+      'Returns a presigned S3 GET URL for a ready video, forcing an attachment Content-Disposition so the client downloads the file instead of playing it inline. Uses the same storage key as the streaming endpoint.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Presigned download URL',
+    schema: {
+      properties: {
+        url: { type: 'string' },
+        expires_in: { type: 'number' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Video not found',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Video is not ready for playback',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  async download(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<DownloadUrlResult> {
+    return this.videosService.getDownloadUrl(id);
   }
 }
